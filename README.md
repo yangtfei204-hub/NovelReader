@@ -1,4 +1,4 @@
-# 🐾 NovelReader - 萌猫小说阅读器
+# 🐾 NovelReader
 
 > SillyTavern 第三方扩展 —— 在酒馆中沉浸阅读本地小说
 
