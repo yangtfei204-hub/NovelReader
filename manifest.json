@@ -1,0 +1,12 @@
+{
+    "display_name": "🐾 NovelReader - 萌猫小说阅读器",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "未初",
+    "version": "2.0.0",
+    "homePage": "https://github.com/yangtfei204-hub/NovelReader.git",
+    "auto_update": true
+}
