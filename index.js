@@ -141,7 +141,8 @@ const DEFAULT_SETTINGS = {
     avatarFrameSize: 100,
     avatarFrameOffsetX: 0,
     avatarFrameOffsetY: 0,
-    badgeEarsVisible: true  //  猫耳外框显隐
+    badgeEarsVisible: true,  //  猫耳外框显隐
+    enabled: false
 };
 
 
@@ -511,6 +512,8 @@ function loadExtensionSettings() {
             if (state.settings.avatarFrameOffsetY === undefined) state.settings.avatarFrameOffsetY = 0;
             if (state.settings.avatarFrameVisible === undefined) state.settings.avatarFrameVisible = true;
             if (state.settings.avatarFramePosition === undefined) state.settings.avatarFramePosition = 'back';
+            // 🆕 启用状态字段兼容
+            if (state.settings.enabled === undefined) state.settings.enabled = false;
             // 🆕 明暗度字段兼容
             if (state.settings.readerBgBrightness === undefined) state.settings.readerBgBrightness = 1;
             // 🆕 猫耳外框显隐兼容
@@ -657,7 +660,6 @@ function applyTheme() {
     const theme = state.settings.theme;
     const colors = state.settings.customColors || THEME_COLORS[theme] || THEME_COLORS.pink;
 
-    // 获取所有需要应用主题的元素
     const elements = [
         panelElement, 
         floatBadgeElement, 
@@ -667,12 +669,14 @@ function applyTheme() {
         tocDialogElement
     ].filter(Boolean);
     
-    // 为每个元素单独设置 CSS 变量和主题属性
+    // 🔧 新增：也把 settings-box 内部元素纳入主题应用范围
+    if (settingsDialogElement) {
+        const box = settingsDialogElement.querySelector('.novel-settings-box');
+        if (box) elements.push(box);
+    }
+
     elements.forEach(el => {
-        // 🔧 先设置主题属性（触发 CSS 选择器）
         el.setAttribute('data-novel-theme', theme);
-        
-        // 🔧 再强制设置所有 CSS 变量（避免继承污染和默认值覆盖）
         el.style.setProperty('--kp-primary', colors.primary);
         el.style.setProperty('--kp-primary-light', colors.primaryLight);
         el.style.setProperty('--kp-primary-deep', colors.primaryDeep);
@@ -2229,27 +2233,37 @@ function setupSettingsEvents() {
             const colors = THEME_COLORS[selectedTheme] || THEME_COLORS.pink;
 
             state.settings.theme = selectedTheme;
-            
+    
+            // 🔧 修复：同时更新 mask 层和内部 settings-box 的 data-novel-theme
             dialog.setAttribute('data-novel-theme', selectedTheme);
-            
-            dialog.style.setProperty('--kp-primary', colors.primary);
-            dialog.style.setProperty('--kp-primary-light', colors.primaryLight);
-            dialog.style.setProperty('--kp-primary-deep', colors.primaryDeep);
-            dialog.style.setProperty('--kp-secondary', colors.secondary);
-            dialog.style.setProperty('--kp-bg', colors.bg);
-            dialog.style.setProperty('--kp-bg-soft', colors.bgSoft);
-            dialog.style.setProperty('--kp-text', colors.text);
-            dialog.style.setProperty('--kp-text-muted', colors.textMuted);
-            dialog.style.setProperty('--kp-border', colors.border);
-            dialog.style.setProperty('--kp-action-primary', colors.actionPrimary);
-            dialog.style.setProperty('--kp-action-primary-text', colors.actionPrimaryText);
-            dialog.style.setProperty('--kp-action-secondary', colors.actionSecondary);
-            dialog.style.setProperty('--kp-action-secondary-text', colors.actionSecondaryText);
-            dialog.style.setProperty('--kp-shadow', `0 12px 35px ${colors.shadow}`);
-
-            if (panelElement) panelElement.setAttribute('data-novel-theme', selectedTheme);
-            if (floatBadgeElement) floatBadgeElement.setAttribute('data-novel-theme', selectedTheme);
-
+            const settingsBox = dialog.querySelector('.novel-settings-box');
+            if (settingsBox) {
+                settingsBox.setAttribute('data-novel-theme', selectedTheme);
+                // 同步设置 CSS 变量到 settings-box（因为它有独立的默认变量声明）
+                settingsBox.style.setProperty('--kp-primary', colors.primary);
+                settingsBox.style.setProperty('--kp-primary-light', colors.primaryLight);
+                settingsBox.style.setProperty('--kp-primary-deep', colors.primaryDeep);
+                settingsBox.style.setProperty('--kp-secondary', colors.secondary);
+                settingsBox.style.setProperty('--kp-bg', colors.bg);
+                settingsBox.style.setProperty('--kp-bg-soft', colors.bgSoft);
+                settingsBox.style.setProperty('--kp-text', colors.text);
+                settingsBox.style.setProperty('--kp-text-muted', colors.textMuted);
+                settingsBox.style.setProperty('--kp-border', colors.border);
+                settingsBox.style.setProperty('--kp-action-primary', colors.actionPrimary);
+                settingsBox.style.setProperty('--kp-action-primary-text', colors.actionPrimaryText);
+                settingsBox.style.setProperty('--kp-action-secondary', colors.actionSecondary);
+                settingsBox.style.setProperty('--kp-action-secondary-text', colors.actionSecondaryText);
+                settingsBox.style.setProperty('--kp-shadow', `0 12px 35px ${colors.shadow}`);
+        
+                // 暗色主题背景色直接设置
+                const bgMap = {
+                    'glass-light': 'rgba(255, 255, 255, 0.75)',
+                    'glass-dark': 'rgba(30, 25, 45, 0.78)',
+                    'sakura': 'rgba(40, 30, 45, 0.82)',
+                    'mocha': 'rgba(45, 35, 28, 0.84)'
+                };
+                settingsBox.style.backgroundColor = bgMap[selectedTheme] || '';
+            }
             applyTheme();
 
             const bgMap = {
@@ -2258,7 +2272,6 @@ function setupSettingsEvents() {
                 'sakura': 'rgba(40, 30, 45, 0.82)',
                 'mocha': 'rgba(45, 35, 28, 0.84)'
             };
-            dialog.style.backgroundColor = bgMap[selectedTheme] || colors.bg;
         };
     });
 
@@ -2922,12 +2935,15 @@ function initDragSystem(panel, handle, isBadge) {
 function enterFloatingState() {
     state.isFloating = true;
     let badgeLeft = null, badgeTop = null;
-    if (panelElement) {
+    if (panelElement && panelElement.style.display !== 'none') {
+        // 仅当面板可见时，才基于面板位置计算悬浮球坐标
         const rect = panelElement.getBoundingClientRect();
         state.savedPos = { left: rect.left, top: rect.top };
         const dim = BADGE_DIMENSIONS[state.settings.badgeSize] || BADGE_DIMENSIONS.medium;
         badgeLeft = rect.left + rect.width / 2 - dim.w / 2;
         badgeTop = rect.top + rect.height / 2 - dim.h / 2;
+    }
+    if (panelElement) {
         panelElement.style.display = 'none';
     }
     createFloatBadge(badgeLeft, badgeTop);
@@ -3023,49 +3039,83 @@ async function initExtension() {
         // 🆕 自动迁移旧版封面数据
         await migrateBookCoversToIndexedDB();
 
-        // 🔧 根据设置决定启动方式
-        if (state.settings.startAsFloating) {
-            // 悬浮球启动
-            createPanel();
+        // 🔧 根据启用状态和设置决定启动方式
+        createPanel();
+        applyTheme();
+
+        if (!state.settings.enabled) {
+            // 默认禁用状态：隐藏一切 UI
             panelElement.style.display = 'none';
-            applyTheme();
+            state.isFloating = true;
+        } else if (state.settings.startAsFloating) {
+            // 已启用 + 悬浮球模式
+            panelElement.style.display = 'none';
             state.isFloating = true;
             createFloatBadge();
         } else {
-            // 完整面板启动
-            createPanel();
-            applyTheme();
+            // 已启用 + 面板模式
+            // 什么都不做，面板已经显示
         }
+
 
         // 在 ST 菜单侧边栏注入开关
         let attempts = 0;
         const injectInterval = setInterval(() => {
             attempts++;
             const menu = document.getElementById('extensions_settings');
-            if (menu && !document.getElementById('novel-ext-nav-toggle')) {
-                // 🔧 修改：使用 CSS 变量，样式和播放器保持一致
+            if (menu && !document.getElementById('novel-ext-nav-section')) {
                 menu.insertAdjacentHTML('afterbegin', `
-                    <div class="inline-drawer" id="novel-ext-nav-toggle" style="margin-bottom: 10px; cursor: pointer; padding: 10px; background: var(--kp-primary-light, #fff0f3); border-radius: 10px; border: 2px dashed var(--kp-primary, #ff85a7); text-align: center; color: var(--kp-primary-deep, #fb7299); font-weight: bold; transition: all 0.2s ease;">
-                        <span>🐾 唤醒小说阅读器 🐾</span>
+                    <div class="inline-drawer" id="novel-ext-nav-section">
+                        <div class="novel-ext-menu-header" id="novel-ext-menu-header">
+                            <div class="novel-ext-menu-icon">📚</div>
+                            <div class="novel-ext-menu-title-area">
+                                <span class="novel-ext-menu-title">萌猫小说阅读器</span>
+                                <span class="novel-ext-menu-subtitle">Novel Reader v2.0</span>
+                            </div>
+                            <label class="novel-ext-toggle-switch" title="启用/禁用插件">
+                                <input type="checkbox" id="novel-ext-enable-toggle" ${state.settings.enabled ? 'checked' : ''}>
+                                <span class="novel-ext-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="novel-ext-menu-body" id="novel-ext-menu-body" style="display: ${state.settings.enabled ? 'block' : 'none'};">
+                            <div class="novel-ext-menu-desc">
+                                <span>🐾 支持 TXT 导入、多主题切换、自定义字体与背景</span>
+                            </div>
+                            <button id="novel-ext-open-btn" class="novel-ext-menu-open-btn" type="button">
+                                <span class="novel-ext-btn-icon">🐱</span>
+                                <span>打开阅读器</span>
+                            </button>
+                        </div>
                     </div>
                 `);
-                
-                const toggleBtn = document.getElementById('novel-ext-nav-toggle');
-                toggleBtn.onclick = toggleMainPanel;
-                
-                // 🔧 添加 hover 效果
-                toggleBtn.onmouseenter = () => {
-                    toggleBtn.style.background = 'var(--kp-primary, #ff85a7)';
-                    toggleBtn.style.color = 'var(--kp-bg, #ffffff)';
-                    toggleBtn.style.transform = 'scale(1.02)';
+
+                // 启用开关事件
+                const enableToggle = document.getElementById('novel-ext-enable-toggle');
+                enableToggle.onchange = (e) => {
+                    state.settings.enabled = e.target.checked;
+                    const menuBody = document.getElementById('novel-ext-menu-body');
+                    if (e.target.checked) {
+                        menuBody.style.display = 'block';
+                        // 启用时如果面板和悬浮球都不在，就创建悬浮球
+                        if (!panelElement || panelElement.style.display === 'none') {
+                            if (!floatBadgeElement || floatBadgeElement.style.display === 'none') {
+                                enterFloatingState();
+                            }
+                        }
+                    } else {
+                        menuBody.style.display = 'none';
+                        // 禁用时隐藏面板和悬浮球
+                        if (panelElement) panelElement.style.display = 'none';
+                        if (floatBadgeElement) floatBadgeElement.style.display = 'none';
+                    }
+                    saveExtensionSettings();
                 };
-                toggleBtn.onmouseleave = () => {
-                    toggleBtn.style.background = 'var(--kp-primary-light, #fff0f3)';
-                    toggleBtn.style.color = 'var(--kp-primary-deep, #fb7299)';
-                    toggleBtn.style.transform = 'scale(1)';
-                };
+
+                // 打开阅读器按钮事件
+                const openBtn = document.getElementById('novel-ext-open-btn');
+                openBtn.onclick = toggleMainPanel;
             }
-            if (document.getElementById('novel-ext-nav-toggle') || attempts > 20) {
+            if (document.getElementById('novel-ext-nav-section') || attempts > 20) {
                 clearInterval(injectInterval);
             }
         }, 1000);

@@ -918,25 +918,38 @@
 }
 
 /* ========== 悬浮球背景色统一修正 ========== */
-.novel-badge-ear,
+
 .novel-badge-circle {
     background-color: #ffffff !important;
 }
 
 /* 暗色主题使用对应的纯色背景 */
-[data-novel-theme="glass-dark"] .novel-badge-ear,
 [data-novel-theme="glass-dark"] .novel-badge-circle {
     background-color: #1e192d !important;
 }
+[data-novel-theme="glass-dark"] .novel-badge-ear {
+    background-color: var(--kp-primary-deep) !important;
+}
 
-[data-novel-theme="sakura"] .novel-badge-ear,
 [data-novel-theme="sakura"] .novel-badge-circle {
     background-color: #281e2d !important;
 }
+[data-novel-theme="sakura"] .novel-badge-ear {
+    background-color: var(--kp-primary-deep) !important;
+}
 
-[data-novel-theme="mocha"] .novel-badge-ear,
 [data-novel-theme="mocha"] .novel-badge-circle {
     background-color: #2d231c !important;
+}
+[data-novel-theme="mocha"] .novel-badge-ear {
+    background-color: var(--kp-primary-deep) !important;
+}
+
+[data-novel-theme="glass-light"] .novel-badge-circle {
+    background-color: #f5f8fc !important;
+}
+[data-novel-theme="glass-light"] .novel-badge-ear {
+    background-color: var(--kp-primary-deep) !important;
 }
 
 /* 毛玻璃白使用浅色不透明背景 */
@@ -1546,4 +1559,196 @@ input[type="range"]::-moz-range-thumb:hover {
 .novel-badge-ear[style*="display: none"] + .novel-badge-ear[style*="display: none"] ~ .novel-badge-circle,
 .novel-badge-circle[style*="border-width: 0px"] {
     box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+}
+
+
+/* ========== 扩展菜单栏美化 ========== */
+#novel-ext-nav-section {
+    margin-bottom: 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid rgba(251, 114, 153, 0.3);
+    background: linear-gradient(135deg, #fff0f3 0%, #ffffff 100%);
+    box-shadow: 0 4px 12px rgba(251, 114, 153, 0.1);
+    transition: all 0.3s ease;
+}
+
+#novel-ext-nav-section:hover {
+    border-color: rgba(251, 114, 153, 0.6);
+    box-shadow: 0 6px 18px rgba(251, 114, 153, 0.15);
+    transform: translateY(-1px);
+}
+
+.novel-ext-menu-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: linear-gradient(to right, rgba(251, 114, 153, 0.08), transparent);
+    cursor: default;
+    user-select: none;
+}
+
+.novel-ext-menu-icon {
+    font-size: 22px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #ff85a7, #fb7299);
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(251, 114, 153, 0.3);
+}
+
+.novel-ext-menu-title-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.novel-ext-menu-title {
+    font-weight: 700;
+    font-size: 13px;
+    color: #fb7299;
+    line-height: 1.2;
+}
+
+.novel-ext-menu-subtitle {
+    font-size: 10px;
+    color: #b8a4ad;
+    line-height: 1.2;
+}
+
+/* 开关美化 */
+.novel-ext-toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.novel-ext-toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.novel-ext-toggle-slider {
+    position: absolute;
+    inset: 0;
+    background: #ddd;
+    border-radius: 22px;
+    transition: all 0.3s ease;
+}
+
+.novel-ext-toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 3px;
+    bottom: 3px;
+    background: #ffffff;
+    border-radius: 50%;
+    transition: all 0.3s ease;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.novel-ext-toggle-switch input:checked + .novel-ext-toggle-slider {
+    background: linear-gradient(135deg, #ff85a7, #fb7299);
+    box-shadow: 0 2px 8px rgba(251, 114, 153, 0.4);
+}
+
+.novel-ext-toggle-switch input:checked + .novel-ext-toggle-slider::before {
+    transform: translateX(18px);
+}
+
+/* 菜单体 */
+.novel-ext-menu-body {
+    padding: 0 14px 14px 14px;
+    animation: novel-menu-slide-down 0.25s ease;
+}
+
+@keyframes novel-menu-slide-down {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.novel-ext-menu-desc {
+    font-size: 11px;
+    color: #888;
+    line-height: 1.6;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    background: rgba(251, 114, 153, 0.05);
+    border-radius: 8px;
+    border-left: 3px solid #ff85a7;
+}
+
+.novel-ext-menu-open-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #ff85a7, #fb7299);
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 3px 10px rgba(251, 114, 153, 0.3);
+}
+
+.novel-ext-menu-open-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(251, 114, 153, 0.4);
+    background: linear-gradient(135deg, #fb7299, #e9537d);
+}
+
+.novel-ext-menu-open-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(251, 114, 153, 0.3);
+}
+
+.novel-ext-btn-icon {
+    font-size: 16px;
+}
+
+/* SillyTavern 暗色模式适配 */
+body.dark #novel-ext-nav-section,
+[data-theme="dark"] #novel-ext-nav-section {
+    background: linear-gradient(135deg, rgba(60, 40, 55, 0.8) 0%, rgba(40, 35, 50, 0.9) 100%);
+    border-color: rgba(251, 114, 153, 0.25);
+}
+
+body.dark .novel-ext-menu-title,
+[data-theme="dark"] .novel-ext-menu-title {
+    color: #f8a5c2;
+}
+
+body.dark .novel-ext-menu-subtitle,
+[data-theme="dark"] .novel-ext-menu-subtitle {
+    color: #9a8fb0;
+}
+
+body.dark .novel-ext-menu-desc,
+[data-theme="dark"] .novel-ext-menu-desc {
+    color: #c0b0c8;
+    background: rgba(251, 114, 153, 0.08);
 }
