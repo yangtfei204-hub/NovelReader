@@ -2035,10 +2035,10 @@ function pagedNext() {
     } else {
         // 推页模式
         state._pagedOffset = newOffset;
+        content.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.1, 0.25, 1)';
         content.style.transform = `translateY(-${state._pagedOffset}px)`;
         updateReadingProgress();
     }
-
     const indicator = document.getElementById('novel-page-indicator');
     if (indicator) indicator.textContent = `${state._pagedCurrentPage} / ${state._pagedTotalPages}`;
 }
@@ -2082,10 +2082,10 @@ function pagedPrev() {
     } else {
         // 推页模式
         state._pagedOffset = newOffset;
+        content.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.1, 0.25, 1)';
         content.style.transform = `translateY(-${state._pagedOffset}px)`;
         updateReadingProgress();
     }
-
     const indicator = document.getElementById('novel-page-indicator');
     if (indicator) indicator.textContent = `${state._pagedCurrentPage} / ${state._pagedTotalPages}`;
 }
