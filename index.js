@@ -143,6 +143,12 @@ const DEFAULT_SETTINGS = {
     avatarFrameOffsetX: 0,
     avatarFrameOffsetY: 0,
     badgeEarsVisible: true,  //  猫耳外框显隐
+    readerMode: 'scroll',  // 🆕 阅读模式：'scroll' 滚动 / 'paged' 推页 / 'slide' 左右翻页
+    bookmarks: {},  // 🆕 书签数据：{ bookId: [{ chapterIndex, paragraphIndex, type, note, timestamp }] }
+    shelfSortMode: 'addedTime',  // 🆕 排序：'addedTime' | 'title' | 'lastRead'
+    readerLineHeight: 1.8,  // 🆕 行间距（1.2-3.0）
+    readerParagraphSpacing: 14,  // 🆕 段间距 px（0-40）
+    readingHistory: [],  // 🆕 最近阅读历史 [{ bookId, title, timestamp }]，最多5条
     enabled: false
 };
 
@@ -159,8 +165,15 @@ const state = {
     books: [],
     activeBookId: null,
     activeChapterIndex: 0,
-    searchQuery: ''
+    searchQuery: '',
+    // 🆕 翻页模式运行时状态（不持久化）
+    _pagedOffset: 0,
+    _pagedPageHeight: 400,
+    _pagedContentHeight: 0,
+    _pagedTotalPages: 1,
+    _pagedCurrentPage: 1
 };
+
 
 // ==================== IndexedDB 核心 ====================
 let dbInstance = null;
@@ -771,6 +784,18 @@ function loadExtensionSettings() {
             if (state.settings.readerBgBrightness === undefined) state.settings.readerBgBrightness = 1;
             // 🆕 猫耳外框显隐兼容
             if (state.settings.badgeEarsVisible === undefined) state.settings.badgeEarsVisible = true;
+            // 🆕 阅读模式兼容
+            if (state.settings.readerMode === undefined) state.settings.readerMode = 'scroll';
+            // 🆕 书签数据兼容
+            if (state.settings.bookmarks === undefined) state.settings.bookmarks = {};
+            // 🆕 排序模式兼容
+            if (state.settings.shelfSortMode === undefined) state.settings.shelfSortMode = 'addedTime';
+            // 🆕 行间距/段间距兼容
+            if (state.settings.readerLineHeight === undefined) state.settings.readerLineHeight = 1.8;
+            if (state.settings.readerParagraphSpacing === undefined) state.settings.readerParagraphSpacing = 14;
+            // 🆕 阅读历史兼容
+            if (!Array.isArray(state.settings.readingHistory)) state.settings.readingHistory = [];
+
         } else {
             saveExtensionSettings();
         }
@@ -1156,7 +1181,14 @@ function applyReaderStyles() {
     }
     
     readerContent.style.fontFamily = fontFamily;
+
+    // 🆕 应用行间距和段间距
+    readerContent.style.lineHeight = String(state.settings.readerLineHeight || 1.8);
+    const paragraphs = readerContent.querySelectorAll('.novel-p');
+    const spacing = (state.settings.readerParagraphSpacing !== undefined ? state.settings.readerParagraphSpacing : 14) + 'px';
+    paragraphs.forEach(p => { p.style.marginBottom = spacing; });
 }
+
 
 
 // 🔧 新增：应用主页面背景图片
@@ -1551,6 +1583,33 @@ function compressImage(file, maxWidth, maxHeight, quality, callback) {
     reader.readAsDataURL(file);
 }
 
+// ==================== 阅读历史 ====================
+function renderReadingHistory() {
+    const bar = document.getElementById('novel-history-bar');
+    if (!bar) return;
+
+    const history = state.settings.readingHistory || [];
+    // 只显示书架中仍存在的书
+    const validHistory = history.filter(h => state.books.some(b => b.id === h.bookId));
+
+    if (validHistory.length === 0) {
+        bar.style.display = 'none';
+        return;
+    }
+
+    bar.style.display = 'flex';
+    bar.innerHTML = '<span class="novel-history-label">📖 最近</span>' +
+        validHistory.map(h => `<span class="novel-history-chip" data-book-id="${h.bookId}" title="${escapeHtml(h.title)}">${escapeHtml(h.title)}</span>`).join('');
+
+    bar.querySelectorAll('.novel-history-chip').forEach(chip => {
+        chip.onclick = () => {
+            const bookId = chip.dataset.bookId;
+            openReader(bookId);
+        };
+    });
+}
+
+
 
 // ==================== 渲染书架 ====================
 function renderShelf() {
@@ -1562,7 +1621,17 @@ function renderShelf() {
     container.className = `novel-shelf-${layout}`;
 
     const query = state.searchQuery.trim().toLowerCase();
-    const filteredBooks = state.books.filter(b => b.title.toLowerCase().includes(query));
+    let filteredBooks = state.books.filter(b => b.title.toLowerCase().includes(query));
+
+    // 🆕 排序
+    const sortMode = state.settings.shelfSortMode || 'addedTime';
+    if (sortMode === 'title') {
+        filteredBooks.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN'));
+    } else if (sortMode === 'lastRead') {
+        filteredBooks.sort((a, b) => (b.lastReadTime || b.addedTime || 0) - (a.lastReadTime || a.addedTime || 0));
+    } else {
+        filteredBooks.sort((a, b) => (b.addedTime || 0) - (a.addedTime || 0));
+    }
 
     if (filteredBooks.length === 0) {
         container.innerHTML = `<div class="novel-empty-tip">书架上还没有书噢，赶紧导入吧~</div>`;
@@ -1712,7 +1781,11 @@ function renderShelf() {
 
         container.appendChild(item);
     });
+
+    // 🆕 同步更新历史栏
+    renderReadingHistory();
 }
+
 
 
 
@@ -1746,6 +1819,15 @@ async function openReader(bookId) {
 
     state.activeBookId = bookId;
     state.activeChapterIndex = book.currentChapter || 0;
+    book.lastReadTime = Date.now();
+
+    // 🆕 记录阅读历史（最多5条，去重）
+    if (!state.settings.readingHistory) state.settings.readingHistory = [];
+    state.settings.readingHistory = state.settings.readingHistory.filter(h => h.bookId !== bookId);
+    state.settings.readingHistory.unshift({ bookId, title: book.title, timestamp: Date.now() });
+    if (state.settings.readingHistory.length > 5) state.settings.readingHistory = state.settings.readingHistory.slice(0, 5);
+
+    saveExtensionSettings();
 
     document.getElementById('novel-shelf-view').style.display = 'none';
     const readerView = document.getElementById('novel-reader-view');
@@ -1767,11 +1849,24 @@ async function renderActiveChapter() {
             contentBox.innerHTML = '<p class="novel-error">章节内容加载失败，已被移除或尚未就绪。</p>';
             return;
         }
-
         headerTitle.textContent = chapterData.title;
         
         const paragraphs = chapterData.content.split(/\r?\n/).filter(p => p.trim());
         contentBox.innerHTML = paragraphs.map(p => `<p class="novel-p">${escapeHtml(p)}</p>`).join('');
+
+        // 🆕 翻页模式下把标题移入内容区，随内容一起偏移
+        const mode = state.settings.readerMode;
+        if (mode === 'paged' || mode === 'slide') {
+            headerTitle.style.display = 'none';
+            // 在内容顶部插入标题段落
+            const titleP = document.createElement('div');
+            titleP.id = 'novel-reader-inline-title';
+            titleP.style.cssText = 'font-size:18px;font-weight:bold;color:var(--kp-primary-deep);border-bottom:2px dashed var(--kp-primary-light);padding-bottom:8px;margin-bottom:12px;text-align:center;';
+            titleP.textContent = chapterData.title;
+            contentBox.insertBefore(titleP, contentBox.firstChild);
+        } else {
+            headerTitle.style.display = '';
+        }
         contentBox.scrollTop = 0;
 
         book.currentChapter = state.activeChapterIndex;
@@ -1779,9 +1874,579 @@ async function renderActiveChapter() {
         
         // 🔧 新增：应用阅读器自定义样式
         applyReaderStyles();
+
+        // 🆕 应用阅读模式（翻页/滚动）并更新进度
+        setTimeout(() => {
+            applyReaderMode();
+            updateReadingProgress();
+            renderBookmarkDecorations();
+        }, 50);
+
     } catch (err) {
         handleError(err, '章节加载失败');
     }
+}
+
+
+// ==================== 阅读进度 ====================
+function updateReadingProgress() {
+    const container = document.getElementById('novel-reader-container');
+    const progressFill = document.getElementById('novel-progress-fill');
+    const progressText = document.getElementById('novel-progress-text');
+    if (!container || !progressFill || !progressText) return;
+
+    const book = state.books.find(b => b.id === state.activeBookId);
+    if (!book) return;
+
+    // 当前章节进度
+    let chapterPercent = 0;
+    if (state.settings.readerMode === 'paged' || state.settings.readerMode === 'slide') {
+        // 翻页模式：用当前页/总页数
+        const totalPages = state._pagedTotalPages || 1;
+        const currentPage = state._pagedCurrentPage || 1;
+        chapterPercent = Math.round((currentPage / totalPages) * 100);
+    } else {
+        // 滚动模式：用 scrollTop
+        const scrollHeight = container.scrollHeight - container.clientHeight;
+        if (scrollHeight > 0) {
+            chapterPercent = Math.round((container.scrollTop / scrollHeight) * 100);
+        } else {
+            chapterPercent = 100;
+        }
+    }
+
+    // 全书进度 = (已读完整章 + 当前章节进度) / 总章数
+    const bookPercent = Math.round(((state.activeChapterIndex + chapterPercent / 100) / book.chaptersCount) * 100);
+
+    progressFill.style.width = chapterPercent + '%';
+    progressText.textContent = `本章 ${chapterPercent}% · 全书 ${bookPercent}%`;
+}
+
+// ==================== 翻页模式 ====================
+function applyReaderMode() {
+    const container = document.getElementById('novel-reader-container');
+    const content = document.getElementById('novel-reader-content');
+    const modeBtn = document.getElementById('novel-menu-mode-toggle');
+    if (!container || !content) return;
+
+    // 清理旧的翻页元素
+    const oldIndicator = container.querySelector('.novel-page-indicator');
+    if (oldIndicator) oldIndicator.remove();
+    const oldTapLeft = container.querySelector('.novel-page-tap-left');
+    if (oldTapLeft) oldTapLeft.remove();
+    const oldTapRight = container.querySelector('.novel-page-tap-right');
+    if (oldTapRight) oldTapRight.remove();
+
+    const mode = state.settings.readerMode;
+
+    if (mode === 'paged' || mode === 'slide') {
+        // 进入翻页模式（推页或左右翻）
+        container.classList.add('novel-paged-mode');
+        container.style.overflowY = 'hidden';
+        if (modeBtn) {
+            if (mode === 'paged') modeBtn.textContent = '📄 推页';
+            else modeBtn.textContent = '📖 左右翻';
+        }
+
+        // 计算分页
+        const containerHeight = container.clientHeight - 28;
+        state._pagedOffset = 0;
+        state._pagedPageHeight = containerHeight;
+        state._pagedTotalPages = Math.max(1, Math.ceil(content.scrollHeight / containerHeight));
+        state._pagedCurrentPage = 1;
+
+        // 应用初始位置
+        container.scrollTop = 0;
+        content.style.transition = 'none';
+        content.style.transform = 'translateX(0) translateY(0)';
+
+        // 添加翻页指示器
+        const indicator = document.createElement('div');
+        indicator.className = 'novel-page-indicator';
+        indicator.id = 'novel-page-indicator';
+        indicator.textContent = `1 / ${state._pagedTotalPages}`;
+        container.appendChild(indicator);
+
+        // 添加左右点击区域
+        const tapLeft = document.createElement('div');
+        tapLeft.className = 'novel-page-tap-left';
+        tapLeft.onclick = (e) => { e.stopPropagation(); pagedPrev(); };
+        container.appendChild(tapLeft);
+
+        const tapRight = document.createElement('div');
+        tapRight.className = 'novel-page-tap-right';
+        tapRight.onclick = (e) => { e.stopPropagation(); pagedNext(); };
+        container.appendChild(tapRight);
+
+        updateReadingProgress();
+    } else {
+        // 回到滚动模式
+        container.classList.remove('novel-paged-mode');
+        container.style.overflowY = 'auto';
+        content.style.transform = '';
+        if (modeBtn) modeBtn.textContent = '📜 滚动';
+
+        state._pagedOffset = 0;
+        state._pagedCurrentPage = 1;
+        state._pagedTotalPages = 1;
+
+        updateReadingProgress();
+    }
+}
+
+
+function pagedNext() {
+    const content = document.getElementById('novel-reader-content');
+    const container = document.getElementById('novel-reader-container');
+    if (!content || !container) return;
+
+    const maxOffset = content.scrollHeight - (container.clientHeight - 28);
+    if (state._pagedOffset >= maxOffset) {
+        const book = state.books.find(b => b.id === state.activeBookId);
+        if (book && state.activeChapterIndex < book.chaptersCount - 1) {
+            state.activeChapterIndex++;
+            renderActiveChapter();
+        } else {
+            novelAlert('已经是最后一页了！', '📖');
+        }
+        return;
+    }
+
+    const newOffset = Math.min(state._pagedOffset + state._pagedPageHeight, maxOffset);
+    state._pagedCurrentPage = Math.min(state._pagedCurrentPage + 1, state._pagedTotalPages);
+
+    if (state.settings.readerMode === 'slide') {
+        // 左右翻页：当前页滑出到左侧
+        content.style.transition = 'transform 0.25s ease-in';
+        content.style.transform = `translateX(-100%) translateY(-${state._pagedOffset}px)`;
+        setTimeout(() => {
+            // 瞬间移到右侧 + 设置新偏移
+            content.style.transition = 'none';
+            state._pagedOffset = newOffset;
+            content.style.transform = `translateX(100%) translateY(-${state._pagedOffset}px)`;
+            // 强制重排
+            void content.offsetHeight;
+            // 从右侧滑入到中间
+            content.style.transition = 'transform 0.25s ease-out';
+            content.style.transform = `translateX(0) translateY(-${state._pagedOffset}px)`;
+            // 动画结束后更新进度
+            setTimeout(() => { updateReadingProgress(); }, 260);
+        }, 260);
+    } else {
+        // 推页模式
+        state._pagedOffset = newOffset;
+        content.style.transform = `translateY(-${state._pagedOffset}px)`;
+        updateReadingProgress();
+    }
+
+    const indicator = document.getElementById('novel-page-indicator');
+    if (indicator) indicator.textContent = `${state._pagedCurrentPage} / ${state._pagedTotalPages}`;
+}
+
+function pagedPrev() {
+    const content = document.getElementById('novel-reader-content');
+    if (!content) return;
+
+    if (state._pagedOffset <= 0) {
+        if (state.activeChapterIndex > 0) {
+            state.activeChapterIndex--;
+            renderActiveChapter().then(() => {
+                if (state.settings.readerMode === 'paged' || state.settings.readerMode === 'slide') {
+                    goToLastPage();
+                }
+            });
+        } else {
+            novelAlert('已经是第一页了！', '📖');
+        }
+        return;
+    }
+
+    const newOffset = Math.max(0, state._pagedOffset - state._pagedPageHeight);
+    state._pagedCurrentPage = Math.max(1, state._pagedCurrentPage - 1);
+
+    if (state.settings.readerMode === 'slide') {
+        // 左右翻页：当前页滑出到右侧
+        content.style.transition = 'transform 0.25s ease-in';
+        content.style.transform = `translateX(100%) translateY(-${state._pagedOffset}px)`;
+        setTimeout(() => {
+            // 瞬间移到左侧 + 设置新偏移
+            content.style.transition = 'none';
+            state._pagedOffset = newOffset;
+            content.style.transform = `translateX(-100%) translateY(-${state._pagedOffset}px)`;
+            void content.offsetHeight;
+            // 从左侧滑入到中间
+            content.style.transition = 'transform 0.25s ease-out';
+            content.style.transform = `translateX(0) translateY(-${state._pagedOffset}px)`;
+            setTimeout(() => { updateReadingProgress(); }, 260);
+        }, 260);
+    } else {
+        // 推页模式
+        state._pagedOffset = newOffset;
+        content.style.transform = `translateY(-${state._pagedOffset}px)`;
+        updateReadingProgress();
+    }
+
+    const indicator = document.getElementById('novel-page-indicator');
+    if (indicator) indicator.textContent = `${state._pagedCurrentPage} / ${state._pagedTotalPages}`;
+}
+
+function goToLastPage() {
+    const content = document.getElementById('novel-reader-content');
+    const container = document.getElementById('novel-reader-container');
+    if (!content || !container) return;
+
+    const maxOffset = content.scrollHeight - (container.clientHeight - 28);
+    state._pagedOffset = Math.max(0, maxOffset);
+    state._pagedTotalPages = Math.max(1, Math.ceil(content.scrollHeight / state._pagedPageHeight));
+    state._pagedCurrentPage = state._pagedTotalPages;
+
+    content.style.transition = 'none';
+    content.style.transform = `translateX(0) translateY(-${state._pagedOffset}px)`;
+
+    const indicator = document.getElementById('novel-page-indicator');
+    if (indicator) indicator.textContent = `${state._pagedCurrentPage} / ${state._pagedTotalPages}`;
+    updateReadingProgress();
+}
+
+// ==================== 键盘快捷键 ====================
+function handleReaderKeyboard(e) {
+    // 只在阅读器视图可见时响应
+    const readerView = document.getElementById('novel-reader-view');
+    if (!readerView || readerView.style.display === 'none') return;
+    // 不在输入框中时才响应
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    // 有弹窗打开时不响应
+    if (document.querySelector('.novel-dialog-mask')) return;
+
+    switch (e.key) {
+        case 'ArrowLeft':
+            e.preventDefault();
+            if (state.activeChapterIndex > 0) {
+                state.activeChapterIndex--;
+                renderActiveChapter();
+            }
+            break;
+        case 'ArrowRight':
+            e.preventDefault();
+            const book = state.books.find(b => b.id === state.activeBookId);
+            if (book && state.activeChapterIndex < book.chaptersCount - 1) {
+                state.activeChapterIndex++;
+                renderActiveChapter();
+            }
+            break;
+            case ' ':
+                e.preventDefault();
+                if (state.settings.readerMode === 'paged' || state.settings.readerMode === 'slide') {
+                    pagedNext();
+            } else {
+                const container = document.getElementById('novel-reader-container');
+                if (container) {
+                    container.scrollBy({ top: container.clientHeight * 0.85, behavior: 'smooth' });
+                }
+            }
+            break;
+        case 'Escape':
+            e.preventDefault();
+            quitReader();
+            break;
+    }
+}
+
+// ==================== 书签/标注系统 ====================
+function getBookBookmarks(bookId) {
+    if (!state.settings.bookmarks) state.settings.bookmarks = {};
+    return state.settings.bookmarks[bookId] || [];
+}
+
+function saveBookmark(bookId, bookmark) {
+    if (!state.settings.bookmarks) state.settings.bookmarks = {};
+    if (!state.settings.bookmarks[bookId]) state.settings.bookmarks[bookId] = [];
+    state.settings.bookmarks[bookId].push(bookmark);
+    saveExtensionSettings();
+}
+
+function removeBookmark(bookId, timestamp) {
+    if (!state.settings.bookmarks || !state.settings.bookmarks[bookId]) return;
+    state.settings.bookmarks[bookId] = state.settings.bookmarks[bookId].filter(b => b.timestamp !== timestamp);
+    if (state.settings.bookmarks[bookId].length === 0) {
+        delete state.settings.bookmarks[bookId];
+    }
+    saveExtensionSettings();
+}
+
+function setupBookmarkInteractions() {
+    const contentBox = document.getElementById('novel-reader-content');
+    if (!contentBox) return;
+
+    let longPressTimer = null;
+    let longPressTarget = null;
+
+    // 桌面端：右键段落
+    contentBox.addEventListener('contextmenu', (e) => {
+        const p = e.target.closest('.novel-p');
+        if (!p) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const pIndex = Array.from(contentBox.querySelectorAll('.novel-p')).indexOf(p);
+        openBookmarkMenu(p, pIndex, e.clientX, e.clientY);
+    });
+
+    // 移动端：长按段落
+    contentBox.addEventListener('touchstart', (e) => {
+        const p = e.target.closest('.novel-p');
+        if (!p) return;
+        longPressTarget = p;
+        longPressTimer = setTimeout(() => {
+            if (navigator.vibrate) navigator.vibrate(30);
+            p.classList.add('novel-longpress-active');
+            const pIndex = Array.from(contentBox.querySelectorAll('.novel-p')).indexOf(p);
+            const touch = e.touches[0];
+            openBookmarkMenu(p, pIndex, touch.clientX, touch.clientY);
+        }, 600);
+    });
+
+    contentBox.addEventListener('touchend', () => {
+        if (longPressTimer) clearTimeout(longPressTimer);
+        if (longPressTarget) longPressTarget.classList.remove('novel-longpress-active');
+        longPressTarget = null;
+    });
+
+    contentBox.addEventListener('touchmove', () => {
+        if (longPressTimer) clearTimeout(longPressTimer);
+        if (longPressTarget) longPressTarget.classList.remove('novel-longpress-active');
+        longPressTarget = null;
+    });
+}
+
+function openBookmarkMenu(pElement, pIndex, clientX, clientY) {
+    // 移除旧菜单
+    const oldMenu = document.querySelector('.novel-bookmark-menu');
+    if (oldMenu) oldMenu.remove();
+
+    const bookId = state.activeBookId;
+    const chapterIndex = state.activeChapterIndex;
+    const bookmarks = getBookBookmarks(bookId);
+    const existing = bookmarks.find(b => b.chapterIndex === chapterIndex && b.paragraphIndex === pIndex);
+
+    const menu = document.createElement('div');
+    menu.className = 'novel-bookmark-menu';
+    menu.setAttribute('data-novel-theme', state.settings.theme);
+    menu.style.left = clientX + 'px';
+    menu.style.top = clientY + 'px';
+
+    if (existing) {
+        menu.innerHTML = `
+            <div class="novel-menu-item-ctx" data-action="remove">🗑️ 移除书签</div>
+            <div class="novel-menu-item-ctx" data-action="edit-note">📝 编辑笔记</div>
+            <div class="novel-menu-item-ctx" data-action="toggle-highlight">${existing.type === 'highlight' ? '✖ 取消高亮' : '🖍️ 高亮标注'}</div>
+        `;
+    } else {
+        menu.innerHTML = `
+            <div class="novel-menu-item-ctx" data-action="add-bookmark">🔖 添加书签</div>
+            <div class="novel-menu-item-ctx" data-action="add-highlight">🖍️ 高亮标注</div>
+            <div class="novel-menu-item-ctx" data-action="add-note">📝 书签+笔记</div>
+        `;
+    }
+
+    document.body.appendChild(menu);
+
+    // 确保菜单不超出屏幕
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+
+    // 点击外部关闭
+    setTimeout(() => {
+        document.addEventListener('click', function closeBookmarkMenu(ev) {
+            if (!menu.contains(ev.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeBookmarkMenu);
+            }
+        });
+    }, 50);
+
+    // 菜单项事件
+    menu.querySelectorAll('.novel-menu-item-ctx').forEach(item => {
+        item.onclick = () => {
+            const action = item.dataset.action;
+            menu.remove();
+            const textPreview = pElement.textContent.substring(0, 50);
+
+            if (action === 'add-bookmark') {
+                saveBookmark(bookId, {
+                    chapterIndex,
+                    paragraphIndex: pIndex,
+                    type: 'bookmark',
+                    note: '',
+                    text: textPreview,
+                    timestamp: Date.now()
+                });
+                renderBookmarkDecorations();
+            } else if (action === 'add-highlight') {
+                saveBookmark(bookId, {
+                    chapterIndex,
+                    paragraphIndex: pIndex,
+                    type: 'highlight',
+                    note: '',
+                    text: textPreview,
+                    timestamp: Date.now()
+                });
+                renderBookmarkDecorations();
+            } else if (action === 'add-note') {
+                novelPrompt('请输入笔记内容：', '', '📝').then(note => {
+                    if (note !== null) {
+                        saveBookmark(bookId, {
+                            chapterIndex,
+                            paragraphIndex: pIndex,
+                            type: 'bookmark',
+                            note: note.trim(),
+                            text: textPreview,
+                            timestamp: Date.now()
+                        });
+                        renderBookmarkDecorations();
+                    }
+                });
+            } else if (action === 'remove') {
+                removeBookmark(bookId, existing.timestamp);
+                renderBookmarkDecorations();
+            } else if (action === 'edit-note') {
+                novelPrompt('编辑笔记：', existing.note || '', '📝').then(note => {
+                    if (note !== null) {
+                        existing.note = note.trim();
+                        saveExtensionSettings();
+                        renderBookmarkDecorations();
+                    }
+                });
+            } else if (action === 'toggle-highlight') {
+                existing.type = existing.type === 'highlight' ? 'bookmark' : 'highlight';
+                saveExtensionSettings();
+                renderBookmarkDecorations();
+            }
+        };
+    });
+}
+
+function renderBookmarkDecorations() {
+    const contentBox = document.getElementById('novel-reader-content');
+    if (!contentBox || !state.activeBookId) return;
+
+    const paragraphs = contentBox.querySelectorAll('.novel-p');
+    const bookmarks = getBookBookmarks(state.activeBookId);
+    const chapterBookmarks = bookmarks.filter(b => b.chapterIndex === state.activeChapterIndex);
+
+    // 清理旧装饰
+    paragraphs.forEach(p => {
+        p.classList.remove('novel-bookmarked', 'novel-highlighted');
+        const oldIcon = p.querySelector('.novel-bookmark-icon');
+        if (oldIcon) oldIcon.remove();
+        const oldNote = p.querySelector('.novel-bookmark-note');
+        if (oldNote) oldNote.remove();
+    });
+
+    // 应用书签装饰
+    chapterBookmarks.forEach(bm => {
+        const p = paragraphs[bm.paragraphIndex];
+        if (!p) return;
+
+        if (bm.type === 'highlight') {
+            p.classList.add('novel-highlighted');
+        } else {
+            p.classList.add('novel-bookmarked');
+        }
+
+        // 添加书签图标
+        const icon = document.createElement('span');
+        icon.className = 'novel-bookmark-icon';
+        icon.textContent = bm.type === 'highlight' ? '🖍️' : '🔖';
+        icon.title = '点击管理书签';
+        icon.onclick = (e) => {
+            e.stopPropagation();
+            openBookmarkMenu(p, bm.paragraphIndex, e.clientX, e.clientY);
+        };
+        p.style.position = 'relative';
+        p.appendChild(icon);
+
+        // 显示笔记
+        if (bm.note) {
+            const noteEl = document.createElement('span');
+            noteEl.className = 'novel-bookmark-note';
+            noteEl.textContent = '📝 ' + bm.note;
+            p.appendChild(noteEl);
+        }
+    });
+}
+
+function openBookmarkListDialog() {
+    const oldDialog = document.querySelector('#novel-bookmark-list-dialog');
+    if (oldDialog) oldDialog.remove();
+
+    const bookId = state.activeBookId;
+    const bookmarks = getBookBookmarks(bookId);
+
+    const dialog = document.createElement('div');
+    dialog.id = 'novel-bookmark-list-dialog';
+    dialog.className = 'novel-dialog-mask';
+    dialog.setAttribute('data-novel-theme', state.settings.theme);
+
+    dialog.innerHTML = `
+        <div class="novel-dialog-box" style="width: 340px; max-height:80vh;">
+            <div class="novel-dialog-header">
+                <span>🔖 书签列表 (${bookmarks.length})</span>
+                <button class="novel-dialog-close" type="button">×</button>
+            </div>
+            <div class="novel-dialog-body" style="overflow-y:auto; max-height:60vh; padding:8px;">
+                ${bookmarks.length === 0 ? '<div style="text-align:center;padding:30px;color:var(--kp-text-muted);font-size:12px;">还没有书签噢~<br>长按或右键段落可添加书签</div>' : ''}
+                ${bookmarks.sort((a, b) => a.chapterIndex - b.chapterIndex || a.paragraphIndex - b.paragraphIndex).map(bm => `
+                    <div class="novel-bookmark-list-item" data-timestamp="${bm.timestamp}">
+                        <span class="novel-bm-chapter">${bm.type === 'highlight' ? '🖍️' : '🔖'} 第 ${bm.chapterIndex + 1} 章 · 第 ${bm.paragraphIndex + 1} 段</span>
+                        <span class="novel-bm-text">${escapeHtml(bm.text || '')}</span>
+                        ${bm.note ? '<span class="novel-bm-note">📝 ' + escapeHtml(bm.note) + '</span>' : ''}
+                        <div class="novel-bm-actions">
+                            <button data-action="goto" data-ts="${bm.timestamp}">跳转</button>
+                            <button data-action="delete" data-ts="${bm.timestamp}">删除</button>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(dialog);
+    applyTheme();
+
+    dialog.querySelector('.novel-dialog-close').onclick = () => dialog.remove();
+
+    // 事件委托
+    dialog.querySelectorAll('.novel-bm-actions button').forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            const ts = parseInt(btn.dataset.ts);
+            const action = btn.dataset.action;
+
+            if (action === 'goto') {
+                const bm = bookmarks.find(b => b.timestamp === ts);
+                if (bm) {
+                    state.activeChapterIndex = bm.chapterIndex;
+                    await renderActiveChapter();
+                    // 滚动到对应段落
+                    setTimeout(() => {
+                        const contentBox = document.getElementById('novel-reader-content');
+                        const targetP = contentBox?.querySelectorAll('.novel-p')[bm.paragraphIndex];
+                        if (targetP) {
+                            targetP.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                            targetP.style.outline = '2px solid var(--kp-primary)';
+                            setTimeout(() => { targetP.style.outline = ''; }, 2000);
+                        }
+                    }, 100);
+                    dialog.remove();
+                }
+            } else if (action === 'delete') {
+                removeBookmark(bookId, ts);
+                dialog.remove();
+                openBookmarkListDialog(); // 刷新列表
+            }
+        };
+    });
 }
 
 
@@ -1975,17 +2640,23 @@ function createPanel() {
             <div id="novel-shelf-view" class="novel-view-active">
                 <div class="novel-shelf-header">
                     <div class="novel-search-row">
-                        <input type="text" id="novel-search-input" placeholder="输入书名搜索 (高亮匹配)..." />
+                        <input type="text" id="novel-search-input" placeholder="输入书名搜索..." />
+                        <select id="novel-sort-select" title="排序方式">
+                            <option value="addedTime">按导入</option>
+                            <option value="title">按名称</option>
+                            <option value="lastRead">最近读</option>
+                        </select>
                         <button id="novel-toggle-layout" class="novel-action-btn-flat" title="切换列表/网格排列" type="button">⚃</button>
                     </div>
                     <div class="novel-import-row">
-                        <input type="file" id="novel-file-picker" accept=".txt" style="display:none;" />
-                        <button id="novel-import-btn" class="novel-pink-action-btn" type="button">导入 TXT</button>
+                        <input type="file" id="novel-file-picker" accept=".txt,.epub" style="display:none;" />
+                        <button id="novel-import-btn" class="novel-pink-action-btn" type="button">导入书籍</button>
                         <button id="novel-backup-btn" class="novel-mint-action-btn" type="button">备份</button>
                         <input type="file" id="novel-backup-picker" accept=".json" style="display:none;" />
                         <button id="novel-restore-btn" class="novel-mint-action-btn" type="button">还原</button>
                     </div>
                 </div>
+                <div class="novel-history-bar" id="novel-history-bar" style="display:none;"></div>
                 <div class="novel-shelf-body" id="novel-shelf-container"></div>
             </div>
 
@@ -1995,10 +2666,18 @@ function createPanel() {
                     <div id="novel-reader-content" style="font-size: ${state.settings.readerFontSize}px"></div>
                 </div>
 
+                <div id="novel-reader-progress-bar">
+                    <div class="novel-progress-track">
+                        <div class="novel-progress-fill" id="novel-progress-fill" style="width:0%"></div>
+                    </div>
+                    <span class="novel-progress-text" id="novel-progress-text">0% · 全书 0%</span>
+                </div>
+
                 <div id="novel-reader-menu-overlay">
                     <div class="novel-reader-header-menu">
                         <button id="novel-menu-back-btn" class="novel-menu-item">↩ 退出</button>
                         <div style="flex:1;"></div>
+                        <button id="novel-menu-mode-toggle" class="novel-menu-item" style="font-size:11px;">📄 翻页</button>
                         <button id="novel-menu-font-dec" class="novel-menu-item" style="font-size:12px;">A-</button>
                         <button id="novel-menu-font-inc" class="novel-menu-item" style="font-size:14px;">A+</button>
                     </div>
@@ -2006,10 +2685,13 @@ function createPanel() {
                     <div class="novel-reader-footer-menu">
                         <button id="novel-menu-prev" class="novel-menu-item">◀ 上一章</button>
                         <button id="novel-menu-toc" class="novel-menu-item">📖 目录</button>
+                        <button id="novel-menu-bookmarks" class="novel-menu-item">🔖 书签</button>
                         <button id="novel-menu-next" class="novel-menu-item">下一章 ▶</button>
                     </div>
+
                 </div>
             </div>
+
         </div>
     `;
 
@@ -2037,6 +2719,13 @@ function setupPanelEventDelegation() {
         state.searchQuery = e.target.value;
         renderShelf();
     };
+    const sortSelect = document.getElementById('novel-sort-select');
+    sortSelect.value = state.settings.shelfSortMode || 'addedTime';
+    sortSelect.onchange = (e) => {
+        state.settings.shelfSortMode = e.target.value;
+        saveExtensionSettings();
+        renderShelf();
+    };
 
     document.getElementById('novel-toggle-layout').onclick = () => {
         state.settings.layoutMode = state.settings.layoutMode === 'list' ? 'grid' : 'list';
@@ -2049,7 +2738,11 @@ function setupPanelEventDelegation() {
     filePicker.onchange = (e) => {
         const file = e.target.files[0];
         if (file) {
-            openImportConfigDialog(file);
+            if (file.name.toLowerCase().endsWith('.epub')) {
+                importEpubFile(file);
+            } else {
+                openImportConfigDialog(file);
+            }
             // 🔧 修复：重置文件选择器，允许重复选择同一文件
             e.target.value = '';
         }
@@ -2070,6 +2763,10 @@ function setupPanelEventDelegation() {
 
     const readerContainer = document.getElementById('novel-reader-container');
     readerContainer.onclick = (e) => {
+        // 翻页模式下，左右区域由 tap 元素处理，这里只处理中间区域
+        if (e.target.classList.contains('novel-page-tap-left') || e.target.classList.contains('novel-page-tap-right')) {
+            return;
+        }
         const rect = readerContainer.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
@@ -2080,6 +2777,7 @@ function setupPanelEventDelegation() {
             document.getElementById('novel-reader-menu-overlay').classList.add('active');
         }
     };
+
 
     const menuOverlay = document.getElementById('novel-reader-menu-overlay');
     menuOverlay.onclick = (e) => {
@@ -2114,6 +2812,11 @@ function setupPanelEventDelegation() {
         openTocDialog();
     };
 
+    document.getElementById('novel-menu-bookmarks').onclick = () => {
+        menuOverlay.classList.remove('active');
+        openBookmarkListDialog();
+    };
+
     document.getElementById('novel-menu-font-dec').onclick = () => {
         if (state.settings.readerFontSize > 12) {
             state.settings.readerFontSize -= 2;
@@ -2128,10 +2831,254 @@ function setupPanelEventDelegation() {
             saveExtensionSettings();
         }
     };
+    // 🆕 阅读进度条：监听滚动事件
+    const readerContainerForProgress = document.getElementById('novel-reader-container');
+    readerContainerForProgress.addEventListener('scroll', () => {
+        updateReadingProgress();
+    });
+    // 🆕 阅读模式切换按钮（三态循环：滚动 → 推页 → 左右翻 → 滚动）
+    document.getElementById('novel-menu-mode-toggle').onclick = () => {
+        if (state.settings.readerMode === 'scroll') {
+            state.settings.readerMode = 'paged';
+        } else if (state.settings.readerMode === 'paged') {
+            state.settings.readerMode = 'slide';
+        } else {
+            state.settings.readerMode = 'scroll';
+        }
+        saveExtensionSettings();
+        applyReaderMode();
+        document.getElementById('novel-reader-menu-overlay').classList.remove('active');
+    };
+    // 🆕 键盘快捷键
+    document.addEventListener('keydown', handleReaderKeyboard);
+    // 🆕 书签/标注：段落长按/右键交互
+    setupBookmarkInteractions();
+    // 🆕 渲染阅读历史栏
+    renderReadingHistory();
 
     initDragSystem(panelElement, document.getElementById('novel-ext-header-drag'), false);
 }
 
+// ==================== EPUB 导入 ====================
+async function importEpubFile(file) {
+    // 动态加载 JSZip（如果尚未加载）
+    if (!window.JSZip) {
+        try {
+            await loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+        } catch (err) {
+            handleError(err, 'JSZip 加载失败，无法解析 EPUB');
+            return;
+        }
+    }
+
+    // 显示进度弹窗
+    const progressDialog = document.createElement('div');
+    progressDialog.className = 'novel-dialog-mask';
+    progressDialog.setAttribute('data-novel-theme', state.settings.theme);
+    progressDialog.innerHTML = `
+        <div class="novel-dialog-box" style="width: 320px;">
+            <div class="novel-dialog-header">
+                <span>📥 正在导入 EPUB...</span>
+            </div>
+            <div class="novel-dialog-body" style="text-align:center; padding:24px;">
+                <div style="font-size:14px; color:var(--kp-text); margin-bottom:12px;" id="novel-epub-status">正在解压文件...</div>
+                <div style="width:100%; height:8px; background:var(--kp-primary-light); border-radius:10px; overflow:hidden;">
+                    <div id="novel-epub-progress" style="width:0%; height:100%; background:var(--kp-primary); transition:width 0.3s ease;"></div>
+                </div>
+                <div style="font-size:11px; color:var(--kp-text-muted); margin-top:8px;" id="novel-epub-detail">请稍候...</div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(progressDialog);
+    applyTheme();
+
+    const updateProgress = (percent, status, detail) => {
+        const bar = document.getElementById('novel-epub-progress');
+        const statusEl = document.getElementById('novel-epub-status');
+        const detailEl = document.getElementById('novel-epub-detail');
+        if (bar) bar.style.width = percent + '%';
+        if (statusEl) statusEl.textContent = status;
+        if (detailEl) detailEl.textContent = detail;
+    };
+
+    try {
+        updateProgress(10, '正在解压 EPUB...', `文件大小：${(file.size / 1024).toFixed(0)} KB`);
+
+        const arrayBuffer = await file.arrayBuffer();
+        const zip = await JSZip.loadAsync(arrayBuffer);
+
+        updateProgress(25, '正在解析目录结构...', '读取 content.opf');
+
+        // 找到 container.xml 以定位 OPF 文件
+        const containerXml = await zip.file('META-INF/container.xml')?.async('text');
+        let opfPath = '';
+        if (containerXml) {
+            const rootfileMatch = containerXml.match(/full-path="([^"]+)"/);
+            if (rootfileMatch) opfPath = rootfileMatch[1];
+        }
+        if (!opfPath) {
+            // 回退：尝试找任何 .opf 文件
+            const opfFile = Object.keys(zip.files).find(f => f.endsWith('.opf'));
+            if (opfFile) opfPath = opfFile;
+        }
+        if (!opfPath) throw new Error('无法找到 EPUB 的 content.opf 文件');
+
+        const opfContent = await zip.file(opfPath)?.async('text');
+        if (!opfContent) throw new Error('无法读取 content.opf');
+
+        const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+
+        updateProgress(35, '正在解析章节列表...', '分析 spine 顺序');
+
+        // 解析 OPF
+        const parser = new DOMParser();
+        const opfDoc = parser.parseFromString(opfContent, 'application/xml');
+
+        // 获取书名
+        const titleEl = opfDoc.querySelector('metadata title');
+        const bookTitle = titleEl ? titleEl.textContent.trim() : file.name.replace(/\.[^/.]+$/, '');
+
+        // 获取 manifest（id -> href 映射）
+        const manifest = {};
+        opfDoc.querySelectorAll('manifest item').forEach(item => {
+            manifest[item.getAttribute('id')] = item.getAttribute('href');
+        });
+
+        // 获取 spine 顺序
+        const spineItems = [];
+        opfDoc.querySelectorAll('spine itemref').forEach(ref => {
+            const idref = ref.getAttribute('idref');
+            if (manifest[idref]) spineItems.push(manifest[idref]);
+        });
+
+        if (spineItems.length === 0) throw new Error('EPUB spine 为空，没有可读章节');
+
+        updateProgress(45, '正在提取章节内容...', `共 ${spineItems.length} 个文件`);
+
+        // 逐个提取章节内容
+        const chapters = [];
+        for (let i = 0; i < spineItems.length; i++) {
+            const href = opfDir + spineItems[i];
+            const htmlFile = zip.file(href);
+            if (!htmlFile) continue;
+
+            const htmlContent = await htmlFile.async('text');
+            const { title, text } = extractTextFromHtml(htmlContent, i + 1);
+
+            if (text.trim().length > 0) {
+                chapters.push({ title, content: text });
+            }
+
+            if (i % 5 === 0) {
+                const progress = 45 + Math.floor((i / spineItems.length) * 40);
+                updateProgress(progress, '正在提取章节内容...', `${i + 1} / ${spineItems.length}`);
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
+
+        if (chapters.length === 0) throw new Error('EPUB 中未提取到有效文本内容');
+
+        updateProgress(88, '正在保存到数据库...', `共 ${chapters.length} 章`);
+
+        const bookId = 'book_' + Date.now();
+
+        // 检查并清理同名旧书籍
+        const existingBook = state.books.find(b => b.title === bookTitle);
+        if (existingBook) {
+            try {
+                await deleteBookChaptersFromDB(existingBook.id);
+                state.books = state.books.filter(b => b.id !== existingBook.id);
+            } catch (err) { /* 静默 */ }
+        }
+
+        // 批量保存章节
+        const batchSize = 50;
+        for (let i = 0; i < chapters.length; i += batchSize) {
+            const batch = chapters.slice(i, i + batchSize);
+            await Promise.all(
+                batch.map((ch, idx) => saveChapterToDB(bookId, i + idx, ch.title, ch.content))
+            );
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        updateProgress(96, '正在完成...', '保存书籍信息');
+
+        state.books.push({
+            id: bookId,
+            title: bookTitle,
+            chaptersCount: chapters.length,
+            currentChapter: 0,
+            addedTime: Date.now()
+        });
+
+        saveExtensionSettings();
+        updateProgress(100, '导入完成！', `《${bookTitle}》`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+
+        progressDialog.remove();
+        renderShelf();
+        alert(`✅ EPUB 导入成功！\n\n书名：《${bookTitle}》\n章节：${chapters.length} 章`);
+    } catch (err) {
+        progressDialog.remove();
+        handleError(err, 'EPUB 导入失败');
+    }
+}
+
+function extractTextFromHtml(htmlString, fallbackIndex) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlString, 'text/html');
+
+    // 提取标题：优先 <title>，其次 <h1>-<h3>
+    let title = '';
+    const titleEl = doc.querySelector('title');
+    if (titleEl && titleEl.textContent.trim()) {
+        title = titleEl.textContent.trim();
+    }
+    if (!title) {
+        const heading = doc.querySelector('h1, h2, h3');
+        if (heading && heading.textContent.trim()) {
+            title = heading.textContent.trim();
+        }
+    }
+    if (!title) {
+        title = `第 ${fallbackIndex} 章`;
+    }
+
+    // 提取正文：获取 body 内所有文本段落
+    const body = doc.body;
+    if (!body) return { title, text: '' };
+
+    // 移除 script/style
+    body.querySelectorAll('script, style').forEach(el => el.remove());
+
+    // 提取段落文本
+    const paragraphs = [];
+    const blocks = body.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6');
+    if (blocks.length > 0) {
+        blocks.forEach(block => {
+            const t = block.textContent.trim();
+            if (t) paragraphs.push(t);
+        });
+    } else {
+        // 没有块级元素，直接取 body 文本
+        const bodyText = body.textContent.trim();
+        if (bodyText) paragraphs.push(bodyText);
+    }
+
+    return { title, text: paragraphs.join('\n') };
+}
+
+function loadScript(url) {
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[src="${url}"]`);
+        if (existing) { resolve(); return; }
+        const script = document.createElement('script');
+        script.src = url;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error(`Failed to load: ${url}`));
+        document.head.appendChild(script);
+    });
+}
 
 // ==================== 导入配置对话框 ====================
 function openImportConfigDialog(file) {
@@ -2524,7 +3471,7 @@ function openSettingsDialog() {
                             <div id="novel-frame-preview-ear-right" style="position:absolute;width:18px;height:16px;background:var(--kp-primary-deep);border:3px solid var(--kp-bg);border-radius:10px 10px 0 0;top:3px;right:5px;transform:rotate(30deg);transform-origin:bottom center;${state.settings.badgeEarsVisible !== false ? '' : 'display:none;'}"></div>
                             <div id="novel-frame-preview-box" style="position:absolute;bottom:0;left:3px;width:52px;height:52px;border:${state.settings.badgeEarsVisible !== false ? '4px' : '0px'} solid var(--kp-primary-deep);border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:visible;background:var(--kp-bg);">
                                 <span id="novel-frame-preview-avatar" style="font-size:24px;z-index:1;">${state.settings.avatarType === 'emoji' || !state.settings.avatarValue ? (state.settings.avatarValue || THEMES[state.settings.theme].emoji) : ''}</span>
-                                ${(state.settings.avatarType === 'url' || state.settings.avatarType === 'upload') && state.settings.avatarValue ? '<img src="' + state.settings.avatarValue + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;z-index:1;">' : ''}
+                                ${(state.settings.avatarType === 'url' || state.settings.avatarType === 'upload') && state.settings.avatarValue ? '<img src="' + resolveAsset(state.settings.avatarValue) + '" style="width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;z-index:1;">' : ''}
                             </div>
                         </div>
                     </div>
@@ -2551,7 +3498,15 @@ function openSettingsDialog() {
                         <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">背景明暗度：<span id="novel-brightness-value">${Math.round((state.settings.readerBgBrightness || 1) * 100)}%</span></label>
                         <input type="range" id="novel-reader-brightness-slider" min="50" max="150" value="${(state.settings.readerBgBrightness || 1) * 100}" style="width:100%;">
                     </div>
+                    <div style="margin-bottom:12px;">
+                        <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">行间距：<span id="novel-line-height-value">${state.settings.readerLineHeight || 1.8}</span></label>
+                        <input type="range" id="novel-line-height-slider" min="12" max="30" value="${Math.round((state.settings.readerLineHeight || 1.8) * 10)}" style="width:100%;">
+                    </div>
 
+                    <div style="margin-bottom:12px;">
+                        <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">段间距：<span id="novel-para-spacing-value">${state.settings.readerParagraphSpacing !== undefined ? state.settings.readerParagraphSpacing : 14}px</span></label>
+                        <input type="range" id="novel-para-spacing-slider" min="0" max="40" value="${state.settings.readerParagraphSpacing !== undefined ? state.settings.readerParagraphSpacing : 14}" style="width:100%;">
+                    </div>
                     <div class="novel-reader-font-controls">
                         <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">
                             阅读字体
@@ -2691,13 +3646,14 @@ function setupSettingsEvents() {
                     if (state.settings.avatarValue && state.settings.avatarType === 'upload') {
                         if (previewAvatar) previewAvatar.style.display = 'none';
                         const img = document.createElement('img');
-                        img.src = state.settings.avatarValue;
+                        img.src = resolveAsset(state.settings.avatarValue);
                         img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;z-index:1;';
                         previewBox.appendChild(img);
                     } else {
                         if (previewAvatar) { previewAvatar.style.display = ''; previewAvatar.textContent = THEMES[state.settings.theme].emoji; }
                     }
                 }
+
             }
         };
     });
@@ -2716,12 +3672,15 @@ function setupSettingsEvents() {
                 try {
                     // 🆕 存到 IndexedDB
                     await saveAssetToDB('avatar_img', dataUrl);
+                    state.settings.avatarType = 'upload';
                     state.settings.avatarValue = 'idb:avatar_img';
                     saveExtensionSettings();
                     avatarUploadBtn.textContent = '✓ 上传成功！';
                 } catch (err) {
                     // IndexedDB 失败时回退到直接存储（兼容）
+                    state.settings.avatarType = 'upload';
                     state.settings.avatarValue = dataUrl;
+                    saveExtensionSettings();
                     avatarUploadBtn.textContent = '✓ 上传成功！';
                 }
                 
@@ -2745,9 +3704,13 @@ function setupSettingsEvents() {
                     img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;z-index:1;';
                     previewBox.appendChild(img);
                 }
+                
+                // 🔧 立即刷新悬浮球头像
+                updateBadgeAvatar();
             };
             reader.readAsDataURL(file);
         };
+
     }
 
     // 🆕 Emoji 输入框实时更新预览
@@ -2912,6 +3875,28 @@ function setupSettingsEvents() {
             state.settings.readerBgBrightness = val / 100;
         };
     }
+    // 🆕 行间距滑块
+    const lineHeightSlider = document.getElementById('novel-line-height-slider');
+    const lineHeightValue = document.getElementById('novel-line-height-value');
+    if (lineHeightSlider && lineHeightValue) {
+        lineHeightSlider.oninput = (e) => {
+            const val = parseInt(e.target.value) / 10;
+            lineHeightValue.textContent = val.toFixed(1);
+            state.settings.readerLineHeight = val;
+        };
+    }
+
+    // 🆕 段间距滑块
+    const paraSpacingSlider = document.getElementById('novel-para-spacing-slider');
+    const paraSpacingValue = document.getElementById('novel-para-spacing-value');
+    if (paraSpacingSlider && paraSpacingValue) {
+        paraSpacingSlider.oninput = (e) => {
+            const val = parseInt(e.target.value);
+            paraSpacingValue.textContent = val + 'px';
+            state.settings.readerParagraphSpacing = val;
+        };
+    }
+
 
     // 🔧 字体选择（支持多种方式）
     const fontFamilySelect = document.getElementById('novel-reader-font-family');
@@ -3086,7 +4071,8 @@ function setupSettingsEvents() {
         if (avatarFrameVisible && avatarFrame && (avatarFrameType === 'url' || avatarFrameType === 'upload')) {
             const frame = document.createElement('img');
             frame.className = 'novel-preview-frame-img';
-            frame.src = avatarFrame;
+            frame.src = resolveAsset(avatarFrame);
+
             // 🔧 修改：使用居中定位 + calc 处理偏移，确保预览和实际一致
             frame.style.cssText = `
                 position: absolute;
