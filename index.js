@@ -131,6 +131,7 @@ const DEFAULT_SETTINGS = {
     readerFontFamily: 'system',
     readerCustomFont: '',
     readerCustomFontUrl: '',
+    readerFontImportCSS: '',
     // 📚 书籍封面自定义设置
     bookCovers: {},
     // 🆕 悬浮球头像框设置
@@ -166,19 +167,22 @@ let dbInstance = null;
 
 function initIndexedDB() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open('NovelReaderDB', 2);  // 🔧 版本升级到 2
+        const request = indexedDB.open('NovelReaderDB', 3);  // 🔧 版本升级到 3
         request.onupgradeneeded = (e) => {
             const db = e.target.result;
             const oldVersion = e.oldVersion;
             
-            // 版本 1: 创建 chapters 表
             if (oldVersion < 1 && !db.objectStoreNames.contains('chapters')) {
                 db.createObjectStore('chapters', { keyPath: 'id' });
             }
             
-            // 🆕 版本 2: 创建 bookCovers 表（独立存储封面）
             if (oldVersion < 2 && !db.objectStoreNames.contains('bookCovers')) {
                 db.createObjectStore('bookCovers', { keyPath: 'bookId' });
+            }
+            
+            // 🆕 版本 3: 创建 assets 表（存储背景图、字体等大文件）
+            if (oldVersion < 3 && !db.objectStoreNames.contains('assets')) {
+                db.createObjectStore('assets', { keyPath: 'key' });
             }
         };
         request.onsuccess = (e) => {
@@ -191,6 +195,7 @@ function initIndexedDB() {
         };
     });
 }
+
 
 
 function saveChapterToDB(bookId, chapterIndex, title, content) {
@@ -244,6 +249,105 @@ function deleteBookChaptersFromDB(bookId) {
         };
         request.onerror = () => reject(request.error);
     });
+}
+
+// ==================== 资源存储（IndexedDB） ====================
+
+// 内存缓存：启动后从 IDB 加载到这里，避免重复读取
+const assetCache = {};
+
+/**
+ * 保存大文件资源到 IndexedDB
+ * @param {string} key - 资源 key，如 'main_bg', 'reader_bg', 'custom_font', 'avatar_img', 'avatar_frame'
+ * @param {string} dataUrl - Base64 数据
+ */
+function saveAssetToDB(key, dataUrl) {
+    return new Promise((resolve, reject) => {
+        if (!dbInstance) return reject('DB未初始化');
+        const transaction = dbInstance.transaction(['assets'], 'readwrite');
+        const store = transaction.objectStore('assets');
+        const req = store.put({ key, data: dataUrl, updatedTime: Date.now() });
+        req.onsuccess = () => {
+            assetCache[key] = dataUrl;  // 同步更新内存缓存
+            resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 从 IndexedDB 读取资源
+ * @param {string} key - 资源 key
+ * @returns {Promise<string|null>} Base64 数据
+ */
+function getAssetFromDB(key) {
+    return new Promise((resolve, reject) => {
+        if (!dbInstance) return reject('DB未初始化');
+        // 优先返回内存缓存
+        if (assetCache[key]) return resolve(assetCache[key]);
+        const transaction = dbInstance.transaction(['assets'], 'readonly');
+        const store = transaction.objectStore('assets');
+        const req = store.get(key);
+        req.onsuccess = () => {
+            const result = req.result ? req.result.data : null;
+            if (result) assetCache[key] = result;  // 放入缓存
+            resolve(result);
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 删除资源
+ * @param {string} key - 资源 key
+ */
+function deleteAssetFromDB(key) {
+    return new Promise((resolve, reject) => {
+        if (!dbInstance) return reject('DB未初始化');
+        const transaction = dbInstance.transaction(['assets'], 'readwrite');
+        const store = transaction.objectStore('assets');
+        const req = store.delete(key);
+        req.onsuccess = () => {
+            delete assetCache[key];
+            resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 启动时预加载所有 assets 到内存缓存
+ */
+function preloadAllAssets() {
+    return new Promise((resolve, reject) => {
+        if (!dbInstance) return reject('DB未初始化');
+        const transaction = dbInstance.transaction(['assets'], 'readonly');
+        const store = transaction.objectStore('assets');
+        const req = store.getAll();
+        req.onsuccess = () => {
+            const items = req.result || [];
+            items.forEach(item => {
+                assetCache[item.key] = item.data;
+            });
+            console.log(`[NovelReader] 预加载 ${items.length} 个资源到缓存`);
+            resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * 解析资源值：如果是 idb: 开头就从缓存取，否则原样返回
+ * @param {string} value - settings 中存的值
+ * @returns {string} 实际的 dataUrl 或空字符串
+ */
+function resolveAsset(value) {
+    if (!value) return '';
+    if (value.startsWith('idb:')) {
+        const key = value.substring(4);
+        return assetCache[key] || '';
+    }
+    return value;
 }
 
 // ==================== 封面管理（IndexedDB） ====================
@@ -327,6 +431,62 @@ async function migrateBookCoversToIndexedDB() {
     }
 }
 
+/**
+ * 🔧 旧数据迁移：将 settings 中的大文件迁移到 IndexedDB assets 表
+ */
+async function migrateAssetsToIndexedDB() {
+    let migrated = false;
+
+    // 迁移主页面背景
+    if (state.settings.mainBgImage && !state.settings.mainBgImage.startsWith('idb:')) {
+        try {
+            await saveAssetToDB('main_bg', state.settings.mainBgImage);
+            state.settings.mainBgImage = 'idb:main_bg';
+            migrated = true;
+        } catch (e) { console.warn('[NovelReader] 迁移主背景失败:', e); }
+    }
+
+    // 迁移阅读器背景
+    if (state.settings.readerBgImage && !state.settings.readerBgImage.startsWith('idb:')) {
+        try {
+            await saveAssetToDB('reader_bg', state.settings.readerBgImage);
+            state.settings.readerBgImage = 'idb:reader_bg';
+            migrated = true;
+        } catch (e) { console.warn('[NovelReader] 迁移阅读背景失败:', e); }
+    }
+
+    // 迁移字体文件
+    if (state.settings.readerCustomFontUrl && state.settings.readerCustomFontUrl.startsWith('data:')) {
+        try {
+            await saveAssetToDB('custom_font', state.settings.readerCustomFontUrl);
+            state.settings.readerCustomFontUrl = 'idb:custom_font';
+            migrated = true;
+        } catch (e) { console.warn('[NovelReader] 迁移字体失败:', e); }
+    }
+
+    // 迁移头像（upload 类型）
+    if (state.settings.avatarType === 'upload' && state.settings.avatarValue && state.settings.avatarValue.startsWith('data:')) {
+        try {
+            await saveAssetToDB('avatar_img', state.settings.avatarValue);
+            state.settings.avatarValue = 'idb:avatar_img';
+            migrated = true;
+        } catch (e) { console.warn('[NovelReader] 迁移头像失败:', e); }
+    }
+
+    // 迁移头像框
+    if (state.settings.avatarFrame && state.settings.avatarFrame.startsWith('data:')) {
+        try {
+            await saveAssetToDB('avatar_frame', state.settings.avatarFrame);
+            state.settings.avatarFrame = 'idb:avatar_frame';
+            migrated = true;
+        } catch (e) { console.warn('[NovelReader] 迁移头像框失败:', e); }
+    }
+
+    if (migrated) {
+        saveExtensionSettings();
+        console.log('[NovelReader] 大文件资源迁移完成');
+    }
+}
 
 // ==================== 智能编码检测 ====================
 /**
@@ -471,6 +631,96 @@ function readFileWithEncoding(file, encoding) {
     });
 }
 
+// ==================== 美化弹窗系统 ====================
+function showNovelDialog({ title, message, emoji, type, defaultValue, onConfirm, onCancel }) {
+    const old = document.getElementById('novel-custom-dialog');
+    if (old) old.remove();
+
+    const isPrompt = type === 'prompt';
+    const isConfirm = type === 'confirm';
+
+    const mask = document.createElement('div');
+    mask.id = 'novel-custom-dialog';
+    mask.className = 'novel-dialog-mask';
+    mask.setAttribute('data-novel-theme', state.settings.theme);
+    mask.innerHTML = `
+        <div class="novel-dialog-box" style="width:300px;max-width:88vw;">
+            <div class="novel-dialog-header">
+                <span>${emoji || '🐾'} ${title || '提示'}</span>
+                <button class="novel-dialog-close" type="button">×</button>
+            </div>
+            <div class="novel-dialog-body" style="text-align:center;padding:20px 16px;">
+                <div style="font-size:13px;color:var(--kp-text);margin-bottom:14px;line-height:1.6;">${message}</div>
+                ${isPrompt ? '<input type="text" id="novel-dialog-input" class="novel-avatar-input" style="margin-bottom:12px;" value="' + escapeHtml(defaultValue || '') + '">' : ''}
+                <div style="display:flex;gap:8px;justify-content:center;margin-top:8px;">
+                    ${isConfirm || isPrompt ? '<button id="novel-dialog-cancel" type="button" class="novel-action-btn-sm" style="background:var(--kp-bg-soft);color:var(--kp-text);border:2px solid var(--kp-primary-light);min-width:80px;">取消</button>' : ''}
+                    <button id="novel-dialog-ok" type="button" class="novel-action-btn-sm novel-action-btn-primary" style="min-width:80px;">确定</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(mask);
+    applyTheme();
+
+    const input = mask.querySelector('#novel-dialog-input');
+    if (input) {
+        setTimeout(() => { input.focus(); input.select(); }, 50);
+    }
+
+    const close = (result) => {
+        mask.remove();
+        return result;
+    };
+
+    mask.querySelector('.novel-dialog-close').onclick = () => {
+        close(null);
+        if (onCancel) onCancel();
+    };
+
+    const cancelBtn = mask.querySelector('#novel-dialog-cancel');
+    if (cancelBtn) {
+        cancelBtn.onclick = () => {
+            close(null);
+            if (onCancel) onCancel();
+        };
+    }
+
+    mask.querySelector('#novel-dialog-ok').onclick = () => {
+        if (isPrompt) {
+            const val = input.value;
+            close(val);
+            if (onConfirm) onConfirm(val);
+        } else {
+            close(true);
+            if (onConfirm) onConfirm(true);
+        }
+    };
+
+    if (input) {
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') mask.querySelector('#novel-dialog-ok').click();
+        };
+    }
+}
+
+function novelAlert(message, emoji) {
+    return new Promise(resolve => {
+        showNovelDialog({ title: '提示', message, emoji: emoji || '🐾', type: 'alert', onConfirm: resolve });
+    });
+}
+
+function novelConfirm(message, emoji) {
+    return new Promise(resolve => {
+        showNovelDialog({ title: '确认', message, emoji: emoji || '⚠️', type: 'confirm', onConfirm: () => resolve(true), onCancel: () => resolve(false) });
+    });
+}
+
+function novelPrompt(message, defaultValue, emoji) {
+    return new Promise(resolve => {
+        showNovelDialog({ title: '输入', message, emoji: emoji || '✏️', type: 'prompt', defaultValue, onConfirm: resolve, onCancel: () => resolve(null) });
+    });
+}
 
 // ==================== 错误处理 ====================
 function handleError(error, userMessage = '操作失败') {
@@ -500,6 +750,9 @@ function loadExtensionSettings() {
             // 🔧 兼容性修复：确保新字段存在（针对旧版本用户升级）
             if (!state.settings.readerCustomFontUrl) {
                 state.settings.readerCustomFontUrl = '';
+            }
+            if (!state.settings.readerFontImportCSS) {
+                state.settings.readerFontImportCSS = '';
             }
             // 🔧 新增：确保封面配置字段存在
             if (!state.settings.bookCovers) {
@@ -555,14 +808,15 @@ function saveExtensionSettings() {
 async function exportBackup() {
     try {
         const backupData = {
-            version: '2.0.0',  // 🔧 版本号升级
+            version: '2.1.0',  // 🔧 版本号升级，表示包含 assets
             books: state.books,
             chapters: [],
-            bookCovers: []  // 🆕 新增封面导出
+            bookCovers: [],
+            assets: []  // 🆕 新增：大文件资源
         };
         
         for (const book of state.books) {
-            // 导出章节
+            // 导出章节（原有逻辑不变）
             for (let i = 0; i < book.chaptersCount; i++) {
                 const ch = await getChapterFromDB(book.id, i);
                 if (ch) {
@@ -575,7 +829,7 @@ async function exportBackup() {
                 }
             }
             
-            // 🆕 导出封面
+            // 导出封面（原有逻辑不变）
             try {
                 const cover = await getBookCoverFromDB(book.id);
                 if (cover) {
@@ -587,21 +841,40 @@ async function exportBackup() {
                 }
             } catch (err) {
                 console.warn(`[NovelReader] 导出封面失败 ${book.id}:`, err);
-                // 封面导出失败不影响整体备份
             }
         }
 
+        // 🆕 导出 assets（背景图、字体、头像等大文件）
+        const assetKeys = ['main_bg', 'reader_bg', 'custom_font', 'avatar_img', 'avatar_frame'];
+        for (const key of assetKeys) {
+            try {
+                const data = await getAssetFromDB(key);
+                if (data) {
+                    backupData.assets.push({ key, data });
+                }
+            } catch (err) {
+                console.warn(`[NovelReader] 导出资源 ${key} 失败:`, err);
+                // 单个资源导出失败不影响整体备份
+            }
+        }
+
+        // 生成下载文件
         const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `🐾萌猫小说备份_${new Date().toISOString().slice(0,10)}.json`;
+        a.download = `🐾萌猫小说备份_${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         URL.revokeObjectURL(url);
+        
+        // 🆕 给用户一个完成提示，告知备份内容
+        const assetCount = backupData.assets.length;
+        console.log(`[NovelReader] 备份完成: ${state.books.length} 本书, ${backupData.chapters.length} 章节, ${backupData.bookCovers.length} 封面, ${assetCount} 个资源文件`);
     } catch (err) {
         handleError(err, '导出备份失败');
     }
 }
+
 
 
 async function importBackup(file) {
@@ -609,19 +882,22 @@ async function importBackup(file) {
     reader.onload = async (e) => {
         try {
             const data = JSON.parse(e.target.result);
+            
+            // 基本格式校验
             if (!data.books || !data.chapters) {
                 throw new Error('无效的备份文件格式');
             }
             
             const totalChapters = data.chapters.length;
             
+            // ===== 1. 恢复书籍列表 =====
             for (const newBook of data.books) {
                 if (!state.books.some(b => b.id === newBook.id)) {
                     state.books.push(newBook);
                 }
             }
             
-            // 批量导入章节
+            // ===== 2. 批量恢复章节 =====
             const batchSize = 100;
             for (let i = 0; i < data.chapters.length; i += batchSize) {
                 const batch = data.chapters.slice(i, i + batchSize);
@@ -632,7 +908,8 @@ async function importBackup(file) {
                 );
             }
 
-            // 🆕 批量导入封面（如果有）
+            // ===== 3. 恢复封面（原有逻辑不变） =====
+            let coverCount = 0;
             if (data.bookCovers && Array.isArray(data.bookCovers)) {
                 for (const cover of data.bookCovers) {
                     if (cover.bookId && cover.type) {
@@ -640,13 +917,61 @@ async function importBackup(file) {
                             type: cover.type,
                             value: cover.value
                         });
+                        coverCount++;
                     }
                 }
             }
 
+            // ===== 4. 🆕 恢复 assets（背景图、字体、头像等） =====
+            let assetCount = 0;
+            if (data.assets && Array.isArray(data.assets)) {
+                for (const asset of data.assets) {
+                    if (asset.key && asset.data) {
+                        try {
+                            await saveAssetToDB(asset.key, asset.data);
+                            assetCount++;
+                        } catch (err) {
+                            console.warn(`[NovelReader] 恢复资源 ${asset.key} 失败:`, err);
+                        }
+                    }
+                }
+                
+                // 🔧 恢复完 assets 后，确保 settings 中的引用是正确的 idb: 格式
+                // 检查备份中是否包含对应资源，如果有就把 settings 指向 idb:
+                if (data.assets.some(a => a.key === 'main_bg')) {
+                    state.settings.mainBgImage = 'idb:main_bg';
+                }
+                if (data.assets.some(a => a.key === 'reader_bg')) {
+                    state.settings.readerBgImage = 'idb:reader_bg';
+                }
+                if (data.assets.some(a => a.key === 'custom_font')) {
+                    state.settings.readerCustomFontUrl = 'idb:custom_font';
+                }
+                if (data.assets.some(a => a.key === 'avatar_img')) {
+                    // 只有当头像类型是 upload 时才覆盖
+                    if (state.settings.avatarType === 'upload') {
+                        state.settings.avatarValue = 'idb:avatar_img';
+                    }
+                }
+                if (data.assets.some(a => a.key === 'avatar_frame')) {
+                    state.settings.avatarFrame = 'idb:avatar_frame';
+                }
+            }
+
+            // ===== 5. 保存并刷新 =====
             saveExtensionSettings();
+            applyTheme();          // 刷新主题（会触发背景重新渲染）
+            applyReaderStyles();   // 刷新阅读器样式
             renderShelf();
-            alert(`备份恢复成功！\n共导入 ${data.books.length} 本书，${totalChapters} 个章节${data.bookCovers ? `，${data.bookCovers.length} 个封面` : ''}。`);
+
+            // 🔧 给用户详细的恢复结果
+            let msg = `备份恢复成功！\n\n`;
+            msg += `📚 书籍：${data.books.length} 本\n`;
+            msg += `📄 章节：${totalChapters} 个\n`;
+            if (coverCount > 0) msg += `🖼️ 封面：${coverCount} 个\n`;
+            if (assetCount > 0) msg += `🎨 资源：${assetCount} 个（背景/字体/头像）\n`;
+            alert(msg);
+            
         } catch (err) {
             handleError(err, '恢复备份失败');
         }
@@ -654,6 +979,7 @@ async function importBackup(file) {
     reader.onerror = () => handleError(reader.error, '文件读取失败');
     reader.readAsText(file);
 }
+
 
 // ==================== 主题系统（完全隔离版） ====================
 function applyTheme() {
@@ -712,15 +1038,17 @@ function applyReaderStyles() {
     const readerContainer = document.getElementById('novel-reader-container');
     if (!readerContent || !readerContainer) return;
 
-    // 应用背景图片
-    if (state.settings.readerBgImage) {
-        readerContainer.style.backgroundImage = `url("${state.settings.readerBgImage}")`;
+    // ========== 背景图片部分 ==========
+    // 🔧 改动点：resolveAsset 解析引用
+    const bgImage = resolveAsset(state.settings.readerBgImage);
+
+    if (bgImage) {
+        readerContainer.style.backgroundImage = `url("${bgImage}")`;
         readerContainer.style.backgroundSize = 'cover';
         readerContainer.style.backgroundPosition = 'center';
         readerContainer.style.backgroundRepeat = 'no-repeat';
         readerContainer.style.position = 'relative';
         
-        // 🔧 新增：添加明暗滤镜
         readerContainer.style.filter = `brightness(${state.settings.readerBgBrightness || 1})`;
         
         // 添加半透明遮罩层
@@ -742,12 +1070,12 @@ function applyReaderStyles() {
         readerContent.style.zIndex = '1';
     } else {
         readerContainer.style.backgroundImage = '';
-        readerContainer.style.filter = ''; // 🔧 新增：清除滤镜
+        readerContainer.style.filter = '';
         const overlay = readerContainer.querySelector('.novel-reader-bg-overlay');
         if (overlay) overlay.remove();
     }
 
-    // 🔧 修改：应用字体（支持多种方式）
+    // ========== 字体部分 ==========
     let fontFamily = '';
     
     switch (state.settings.readerFontFamily) {
@@ -768,8 +1096,9 @@ function applyReaderStyles() {
             break;
         case 'customUrl':
         case 'customUpload':
-            if (state.settings.readerCustomFontUrl) {
-                // 动态加载字体
+            // 🔧 改动点：resolveAsset 解析字体引用
+            const fontUrl = resolveAsset(state.settings.readerCustomFontUrl);
+            if (fontUrl) {
                 const customFontName = 'NovelReaderCustomFont';
                 fontFamily = `"${customFontName}", sans-serif`;
                 
@@ -783,11 +1112,41 @@ function applyReaderStyles() {
                 fontFaceStyle.textContent = `
                     @font-face {
                         font-family: "${customFontName}";
-                        src: url("${state.settings.readerCustomFontUrl}");
+                        src: url("${fontUrl}");
                         font-display: swap;
                     }
                 `;
                 document.head.appendChild(fontFaceStyle);
+            } else {
+                fontFamily = 'inherit';
+            }
+            break;
+        case 'cssImport':
+            const cssImportText = state.settings.readerFontImportCSS || '';
+            if (cssImportText) {
+                // 从 CSS 中提取 font-family 名称
+                const fontFamilyMatch = cssImportText.match(/font-family\s*:\s*["']?([^"';}\n]+)["']?\s*[;}]/i);
+                const extractedFontName = fontFamilyMatch ? fontFamilyMatch[1].trim() : '';
+                
+                // 从 CSS 中提取 @import 语句
+                const importMatch = cssImportText.match(/@import\s+url\s*\(\s*["']?([^"')]+)["']?\s*\)/i);
+                
+                // 删除旧的 @import style
+                const oldImportStyle = document.getElementById('novel-css-import-font');
+                if (oldImportStyle) oldImportStyle.remove();
+                
+                if (importMatch) {
+                    const importStyle = document.createElement('style');
+                    importStyle.id = 'novel-css-import-font';
+                    importStyle.textContent = `@import url("${importMatch[1]}");`;
+                    document.head.appendChild(importStyle);
+                }
+                
+                if (extractedFontName) {
+                    fontFamily = `"${extractedFontName}", sans-serif`;
+                } else {
+                    fontFamily = 'inherit';
+                }
             } else {
                 fontFamily = 'inherit';
             }
@@ -808,7 +1167,10 @@ function applyMainBgImage() {
     const oldLayer = panelElement.querySelector('.novel-main-bg-layer');
     if (oldLayer) oldLayer.remove();
 
-    if (!state.settings.mainBgImage) {
+    // 🔧 通过 resolveAsset 解析，如果是 'idb:main_bg' 会从缓存取真实 Base64
+    const bgImage = resolveAsset(state.settings.mainBgImage);
+    
+    if (!bgImage) {
         panelElement.classList.remove('novel-has-main-bg');
         return;
     }
@@ -817,7 +1179,7 @@ function applyMainBgImage() {
 
     const layer = document.createElement('div');
     layer.className = 'novel-main-bg-layer';
-    layer.style.backgroundImage = `url("${state.settings.mainBgImage}")`;
+    layer.style.backgroundImage = `url("${bgImage}")`;
     layer.style.backgroundSize = 'cover';
     layer.style.backgroundPosition = 'center';
     layer.style.backgroundRepeat = 'no-repeat';
@@ -825,6 +1187,7 @@ function applyMainBgImage() {
 
     panelElement.insertBefore(layer, panelElement.firstChild);
 }
+
 
 
 function updateBadgeAvatar() {
@@ -841,24 +1204,29 @@ function updateBadgeAvatar() {
 
     const { avatarType, avatarValue, avatarFrame, avatarFrameType, avatarFrameVisible, avatarFramePosition, avatarFrameSize, avatarFrameOffsetX, avatarFrameOffsetY } = state.settings;
 
-    // 🔧 渲染头像
-    if (avatarType === 'emoji' || !avatarValue) {
+    // 🔧 改动点：解析头像资源引用
+    const resolvedAvatarValue = resolveAsset(avatarValue);
+    const resolvedAvatarFrame = resolveAsset(avatarFrame);
+
+    // 渲染头像
+    if (avatarType === 'emoji' || !resolvedAvatarValue) {
         circle.style.background = '';
         circle.style.backgroundImage = '';
         if (!oldFace) {
             const newFace = document.createElement('div');
             newFace.className = 'novel-badge-text-face';
-            newFace.textContent = avatarValue || THEMES[state.settings.theme].emoji;
+            // emoji 类型直接用原值（不是 Base64），非 emoji 用解析后的值判断
+            newFace.textContent = (avatarType === 'emoji' ? avatarValue : '') || THEMES[state.settings.theme].emoji;
             circle.appendChild(newFace);
         } else {
-            oldFace.textContent = avatarValue || THEMES[state.settings.theme].emoji;
+            oldFace.textContent = (avatarType === 'emoji' ? avatarValue : '') || THEMES[state.settings.theme].emoji;
             oldFace.style.display = '';
         }
     } else if (avatarType === 'url' || avatarType === 'upload') {
         if (oldFace) oldFace.style.display = 'none';
         const img = document.createElement('img');
         img.className = 'novel-badge-avatar-img';
-        img.src = avatarValue;
+        img.src = resolvedAvatarValue;  // 🔧 用解析后的值
         img.alt = 'avatar';
         img.onerror = () => {
             img.remove();
@@ -870,13 +1238,12 @@ function updateBadgeAvatar() {
         circle.appendChild(img);
     }
 
-    // 🆕 渲染头像框（修复定位）
-    if (avatarFrameVisible && avatarFrame && (avatarFrameType === 'url' || avatarFrameType === 'upload')) {
+    // 渲染头像框
+    if (avatarFrameVisible && resolvedAvatarFrame && (avatarFrameType === 'url' || avatarFrameType === 'upload')) {
         const frame = document.createElement('img');
         frame.className = 'novel-badge-avatar-frame';
-        frame.src = avatarFrame;
+        frame.src = resolvedAvatarFrame;  // 🔧 用解析后的值
         frame.alt = 'frame';
-        // 🔧 使用内联 transform，与预览函数完全一致
         frame.style.cssText = `
             position: absolute;
             top: 50%;
@@ -892,7 +1259,7 @@ function updateBadgeAvatar() {
         circle.appendChild(frame);
     }
 
-    // 🆕 猫耳外框显隐
+    // 猫耳外框显隐
     const earLeft = floatBadgeElement.querySelector('.novel-badge-ear.left');
     const earRight = floatBadgeElement.querySelector('.novel-badge-ear.right');
     const showEars = state.settings.badgeEarsVisible !== false;
@@ -904,9 +1271,9 @@ function updateBadgeAvatar() {
         circle.style.borderWidth = '0px';
     }
 
-    // 🔧 新增：强制同步主题属性（确保暗色主题生效）
     floatBadgeElement.setAttribute('data-novel-theme', state.settings.theme);
 }
+
 
 
 // ==================== 自动切章算法（大文件优化版）====================
@@ -1321,7 +1688,8 @@ function renderShelf() {
 
         item.querySelector('.del-btn').onclick = async (e) => {
             e.stopPropagation();
-            if (confirm(`确定要彻底删除《${book.title}》吗？这将不可恢复！`)) {
+            const confirmed = await novelConfirm(`确定要彻底删除《${book.title}》吗？<br>这将不可恢复！`, '🗑️');
+            if (confirmed) {
                 try {
                     await deleteBookChaptersFromDB(book.id);
                     // 🔧 同时删除 IndexedDB 中的封面
@@ -1432,12 +1800,13 @@ function quitReader() {
 function renameBook(bookId) {
     const book = state.books.find(b => b.id === bookId);
     if (!book) return;
-    const newName = prompt("请输入新书名:", book.title);
-    if (newName && newName.trim()) {
-        book.title = newName.trim();
-        saveExtensionSettings();
-        renderShelf();
-    }
+    novelPrompt(`请输入《${book.title}》的新书名:`, book.title, '✏️').then(newName => {
+        if (newName && newName.trim()) {
+            book.title = newName.trim();
+            saveExtensionSettings();
+            renderShelf();
+        }
+    });
 }
 
 // ==================== 书籍封面编辑 ====================
@@ -1726,7 +2095,7 @@ function setupPanelEventDelegation() {
             state.activeChapterIndex--;
             await renderActiveChapter();
         } else {
-            alert('已经是第一章了噢！');
+            novelAlert('已经是第一章了噢！', '📖');
         }
     };
 
@@ -1736,7 +2105,7 @@ function setupPanelEventDelegation() {
             state.activeChapterIndex++;
             await renderActiveChapter();
         } else {
-            alert('已经读到最后一章啦！');
+            novelAlert('已经读到最后一章啦！', '📖');
         }
     };
 
@@ -2098,7 +2467,7 @@ function openSettingsDialog() {
                             <button id="novel-avatar-upload-btn" type="button" class="novel-action-btn-sm novel-action-btn-primary">
                                 ${state.settings.avatarType === 'upload' && state.settings.avatarValue ? '✓ 已上传头像' : '📁 上传头像图片'}
                             </button>
-                            ${state.settings.avatarType === 'upload' && state.settings.avatarValue ? '<div class="novel-avatar-preview"><img src="' + state.settings.avatarValue + '" alt="预览" style="width:48px;height:48px;border-radius:50%;margin-top:8px;object-fit:cover;border:2px solid var(--kp-primary);"></div>' : ''}
+                            ${state.settings.avatarType === 'upload' && state.settings.avatarValue ? '<div class="novel-avatar-preview"><img src="' + resolveAsset(state.settings.avatarValue) + '" alt="预览" style="width:48px;height:48px;border-radius:50%;margin-top:8px;object-fit:cover;border:2px solid var(--kp-primary);"></div>' : ''}
                         </div>
                     </div>
                 </div>
@@ -2184,7 +2553,10 @@ function openSettingsDialog() {
                     </div>
 
                     <div class="novel-reader-font-controls">
-                        <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">阅读字体</label>
+                        <label style="font-size:10px;color:var(--kp-text-muted);display:block;margin-bottom:4px;">
+                            阅读字体
+                            <a href="https://fonts.zeoseven.com/" target="_blank" style="margin-left:8px;color:var(--kp-primary-deep);text-decoration:none;font-weight:bold;">🔗 字体挑选网站</a>
+                        </label>
                         <select id="novel-reader-font-family" class="novel-settings-select" style="margin-bottom:8px;">
                             <option value="system" ${state.settings.readerFontFamily === 'system' ? 'selected' : ''}>系统默认</option>
                             <option value="serif" ${state.settings.readerFontFamily === 'serif' ? 'selected' : ''}>宋体衬线</option>
@@ -2194,6 +2566,7 @@ function openSettingsDialog() {
                             <option value="customName" ${state.settings.readerFontFamily === 'customName' ? 'selected' : ''}>系统字体名称</option>
                             <option value="customUrl" ${state.settings.readerFontFamily === 'customUrl' ? 'selected' : ''}>网络字体链接</option>
                             <option value="customUpload" ${state.settings.readerFontFamily === 'customUpload' ? 'selected' : ''}>上传字体文件</option>
+                            <option value="cssImport" ${state.settings.readerFontFamily === 'cssImport' ? 'selected' : ''}>@import CSS 字体</option>
                         </select>
                         
                         <input type="text" id="novel-reader-custom-font-name" class="novel-avatar-input" placeholder="输入字体名称，如：霞鹜文楷" value="${state.settings.readerFontFamily === 'customName' ? state.settings.readerCustomFont : ''}" style="display:${state.settings.readerFontFamily === 'customName' ? 'block' : 'none'};margin-bottom:8px;">
@@ -2205,6 +2578,10 @@ function openSettingsDialog() {
                             <button id="novel-reader-font-upload-btn" type="button" class="novel-action-btn-sm novel-action-btn-secondary" style="width:100%;">
                                 ${state.settings.readerFontFamily === 'customUpload' && state.settings.readerCustomFontUrl ? '✓ 已上传字体' : '📁 上传字体文件'}
                             </button>
+                        </div>
+                        <div id="novel-reader-font-css-area" style="display:${state.settings.readerFontFamily === 'cssImport' ? 'block' : 'none'}">
+                            <textarea id="novel-reader-font-css-input" class="novel-avatar-input" placeholder="粘贴完整的 @import CSS 代码，例如：\n@import url(&quot;https://...&quot;);\n\nbody {\n    font-family: &quot;字体名称&quot;;\n}" style="width:100%;min-height:100px;resize:vertical;font-size:11px;font-family:monospace;margin-bottom:8px;">${state.settings.readerFontImportCSS || ''}</textarea>
+                            <p class="novel-tip-text">粘贴包含 @import 和 font-family 的完整 CSS 代码，插件会自动提取字体名称和导入链接。</p>
                         </div>
                     </div>
                 </div>
@@ -2334,18 +2711,29 @@ function setupSettingsEvents() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
-                state.settings.avatarValue = ev.target.result;
-                avatarUploadBtn.textContent = '✓ 上传成功！';
+            reader.onload = async (ev) => {
+                const dataUrl = ev.target.result;
+                try {
+                    // 🆕 存到 IndexedDB
+                    await saveAssetToDB('avatar_img', dataUrl);
+                    state.settings.avatarValue = 'idb:avatar_img';
+                    saveExtensionSettings();
+                    avatarUploadBtn.textContent = '✓ 上传成功！';
+                } catch (err) {
+                    // IndexedDB 失败时回退到直接存储（兼容）
+                    state.settings.avatarValue = dataUrl;
+                    avatarUploadBtn.textContent = '✓ 上传成功！';
+                }
                 
+                // 预览区域（用原始 dataUrl 显示，因为这时候缓存里已经有了）
                 const previewArea = document.querySelector('.novel-avatar-preview');
                 if (previewArea) previewArea.remove();
                 const preview = document.createElement('div');
                 preview.className = 'novel-avatar-preview';
-                preview.innerHTML = '<img src="' + ev.target.result + '" alt="预览" style="width:48px;height:48px;border-radius:50%;margin-top:8px;object-fit:cover;border:2px solid var(--kp-primary);">';
+                preview.innerHTML = '<img src="' + dataUrl + '" alt="预览" style="width:48px;height:48px;border-radius:50%;margin-top:8px;object-fit:cover;border:2px solid var(--kp-primary);">';
                 document.getElementById('novel-avatar-upload-area').appendChild(preview);
                 
-                // 🆕 同步更新悬浮球预览
+                // 同步更新悬浮球预览
                 const previewBox = document.getElementById('novel-frame-preview-box');
                 const previewAvatar = document.getElementById('novel-frame-preview-avatar');
                 if (previewBox) {
@@ -2353,7 +2741,7 @@ function setupSettingsEvents() {
                     if (oldImg) oldImg.remove();
                     if (previewAvatar) previewAvatar.style.display = 'none';
                     const img = document.createElement('img');
-                    img.src = ev.target.result;
+                    img.src = dataUrl;
                     img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;position:absolute;inset:0;z-index:1;';
                     previewBox.appendChild(img);
                 }
@@ -2414,23 +2802,37 @@ function setupSettingsEvents() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
-                state.settings.mainBgImage = ev.target.result;
-                mainBgUploadBtn.textContent = '✓ 上传成功！';
-                setTimeout(() => {
-                    closeSettingsDialog();
-                    openSettingsDialog();
-                }, 500);
+            reader.onload = async (ev) => {
+                try {
+                    // 🆕 存到 IndexedDB
+                    await saveAssetToDB('main_bg', ev.target.result);
+                    // 🆕 settings 里只存引用标记
+                    state.settings.mainBgImage = 'idb:main_bg';
+                    saveExtensionSettings();
+                    applyMainBgImage();
+                    mainBgUploadBtn.textContent = '✓ 上传成功！';
+                    setTimeout(() => {
+                        closeSettingsDialog();
+                        openSettingsDialog();
+                    }, 500);
+                } catch (err) {
+                    alert('背景保存失败: ' + (err.message || err));
+                }
             };
             reader.readAsDataURL(file);
         };
     }
 
+
     // 清除主页面背景
     const mainBgClearBtn = document.getElementById('novel-main-bg-clear-btn');
     if (mainBgClearBtn) {
-        mainBgClearBtn.onclick = () => {
+        mainBgClearBtn.onclick = async () => {
+            try {
+                await deleteAssetFromDB('main_bg');  // 🆕 从 IndexedDB 删除
+            } catch (e) { /* 静默处理 */ }
             state.settings.mainBgImage = '';
+            saveExtensionSettings();
             closeSettingsDialog();
             openSettingsDialog();
         };
@@ -2457,13 +2859,19 @@ function setupSettingsEvents() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
-                state.settings.readerBgImage = ev.target.result;
-                readerBgUploadBtn.textContent = '✓ 上传成功！';
-                setTimeout(() => {
-                    closeSettingsDialog();
-                    openSettingsDialog();
-                }, 500);
+            reader.onload = async (ev) => {
+                try {
+                    await saveAssetToDB('reader_bg', ev.target.result);
+                    state.settings.readerBgImage = 'idb:reader_bg';
+                    saveExtensionSettings();
+                    readerBgUploadBtn.textContent = '✓ 上传成功！';
+                    setTimeout(() => {
+                        closeSettingsDialog();
+                        openSettingsDialog();
+                    }, 500);
+                } catch (err) {
+                    alert('阅读背景保存失败: ' + (err.message || err));
+                }
             };
             reader.readAsDataURL(file);
         };
@@ -2472,8 +2880,12 @@ function setupSettingsEvents() {
     // 清除阅读背景
     const readerBgClearBtn = document.getElementById('novel-reader-bg-clear-btn');
     if (readerBgClearBtn) {
-        readerBgClearBtn.onclick = () => {
+        readerBgClearBtn.onclick = async () => {
+            try {
+                await deleteAssetFromDB('reader_bg');
+            } catch (e) { /* 静默处理 */ }
             state.settings.readerBgImage = '';
+            saveExtensionSettings();
             closeSettingsDialog();
             openSettingsDialog();
         };
@@ -2513,6 +2925,8 @@ function setupSettingsEvents() {
             if (customFontNameInput) customFontNameInput.style.display = val === 'customName' ? 'block' : 'none';
             if (customFontUrlInput) customFontUrlInput.style.display = val === 'customUrl' ? 'block' : 'none';
             if (fontUploadArea) fontUploadArea.style.display = val === 'customUpload' ? 'block' : 'none';
+            const fontCssArea = document.getElementById('novel-reader-font-css-area');
+            if (fontCssArea) fontCssArea.style.display = val === 'cssImport' ? 'block' : 'none';
         };
     }
 
@@ -2525,9 +2939,15 @@ function setupSettingsEvents() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
-                state.settings.readerCustomFontUrl = ev.target.result;
-                fontUploadBtn.textContent = '✓ 上传成功！';
+            reader.onload = async (ev) => {
+                try {
+                    await saveAssetToDB('custom_font', ev.target.result);
+                    state.settings.readerCustomFontUrl = 'idb:custom_font';
+                    saveExtensionSettings();
+                    fontUploadBtn.textContent = '✓ 上传成功！';
+                } catch (err) {
+                    alert('字体保存失败: ' + (err.message || err));
+                }
             };
             reader.readAsDataURL(file);
         };
@@ -2572,8 +2992,16 @@ function setupSettingsEvents() {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = (ev) => {
-                state.settings.avatarFrame = ev.target.result;
+            reader.onload = async (ev) => {
+                const dataUrl = ev.target.result;
+                try {
+                    await saveAssetToDB('avatar_frame', dataUrl);
+                    state.settings.avatarFrame = 'idb:avatar_frame';
+                    saveExtensionSettings();
+                } catch (err) {
+                    // 回退
+                    state.settings.avatarFrame = dataUrl;
+                }
                 frameUploadBtn.textContent = '✓ 上传成功！';
                 updateFramePreview();
             };
@@ -2690,7 +3118,8 @@ function setupSettingsEvents() {
         } else if (avatarType === 'url') {
             avatarVal = document.getElementById('novel-avatar-url').value.trim();
         } else if (avatarType === 'upload') {
-            avatarVal = state.settings.avatarValue;
+            // 🔧 保持 IDB 引用不变，不覆盖
+            avatarVal = state.settings.avatarValue;  // 这里可能是 'idb:avatar_img'，保持原样即可
         }
 
         state.settings.theme = theme;
@@ -2718,6 +3147,11 @@ function setupSettingsEvents() {
             state.settings.readerCustomFont = document.getElementById('novel-reader-custom-font-name').value.trim();
         } else if (state.settings.readerFontFamily === 'customUrl') {
             state.settings.readerCustomFontUrl = document.getElementById('novel-reader-custom-font-url').value.trim();
+        } else if (state.settings.readerFontFamily === 'cssImport') {
+            const cssInput = document.getElementById('novel-reader-font-css-input');
+            if (cssInput) {
+                state.settings.readerFontImportCSS = cssInput.value.trim();
+            }
         }
 
         applyTheme();
@@ -3034,10 +3468,12 @@ function toggleMainPanel() {
 async function initExtension() {
     try {
         await initIndexedDB();
+        await preloadAllAssets();
         loadExtensionSettings();
 
         // 🆕 自动迁移旧版封面数据
         await migrateBookCoversToIndexedDB();
+        await migrateAssetsToIndexedDB();
 
         // 🔧 根据启用状态和设置决定启动方式
         createPanel();
